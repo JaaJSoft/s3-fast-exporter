@@ -23,6 +23,10 @@ class Throttle:
     def limit(self) -> int:
         return int(self._limit)
 
+    @property
+    def idle(self) -> bool:
+        return self._in_flight == 0 and not self._waiting
+
     @asynccontextmanager
     async def request(self) -> AsyncIterator[int]:
         """Holds room for one request; yields the pace it is sent at, for slowed_down."""

@@ -67,8 +67,7 @@ class LocalWorker:
         throttle = self._throttles.get(bucket)
         if throttle is None:
             throttle = self._throttles[bucket] = Throttle(self._concurrency)
-            if len(self._throttles) > self._remembered:
-                self._throttles.popitem(last=False)
+            self._forget_idle(bucket)
         else:
             self._throttles.move_to_end(bucket)
         return throttle
@@ -81,6 +80,15 @@ class LocalWorker:
     async def list(self, job: RangeJob) -> Scan:
         lister = await self.lister(job.listing.bucket, job.region)
         return await scan_range(lister, job.listing, job.after, job.until)
+
+    def _forget_idle(self, kept: str) -> None:
+        # A throttle with requests in flight or waiting stays: forgetting it would let a second
+        # one send to the same bucket.
+        while len(self._throttles) > self._remembered:
+            idle = (name for name, each in self._throttles.items() if each.idle and name != kept)
+            if (oldest := next(idle, None)) is None:
+                return
+            del self._throttles[oldest]
 
 
 class RangeQueue:
