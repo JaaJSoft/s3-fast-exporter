@@ -13,7 +13,7 @@ from hypothesis import strategies as st
 from servers import moto_server, serve_app
 
 from exporter.s3.lister import Lister, RetryPolicy, S3Error
-from exporter.s3.presigner import Presigner
+from exporter.s3.presigner import Endpoint, Presigner
 from exporter.s3.scanner import ListPage
 from fakes3 import responses
 from fakes3.app import create_app
@@ -44,7 +44,7 @@ class RecordingPresigner(Presigner):
 
 
 def presigner_for(session: Session, url: str) -> RecordingPresigner:
-    return RecordingPresigner(session, region="us-east-1", endpoint_url=url, path_style=True)
+    return RecordingPresigner(session, region="us-east-1", endpoint=Endpoint(url, path_style=True))
 
 
 def collect(

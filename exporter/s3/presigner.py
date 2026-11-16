@@ -5,39 +5,51 @@ client can send it as long as it does not re-encode it.
 """
 
 import asyncio
+from dataclasses import dataclass
+from typing import Any
 
 from botocore.config import Config
 from botocore.credentials import RefreshableCredentials
+from botocore.exceptions import NoCredentialsError
 from botocore.session import Session
 
 URL_TTL_SECONDS = 900
 
 
+@dataclass(frozen=True, slots=True)
+class Endpoint:
+    """Where S3 is: None means AWS, any other URL an S3 service of its own."""
+
+    url: str | None = None
+    path_style: bool = False
+    use_ssl: bool = True
+
+
+AWS_ENDPOINT = Endpoint()
+
+
+def s3_client(session: Session, region: str, endpoint: Endpoint) -> Any:
+    # signature_version is explicit: botocore otherwise still presigns with SigV2.
+    return session.create_client(
+        "s3",
+        region_name=region,
+        endpoint_url=endpoint.url,
+        use_ssl=endpoint.use_ssl,
+        config=Config(
+            signature_version="s3v4",
+            s3={"addressing_style": "path" if endpoint.path_style else "virtual"},
+        ),
+    )
+
+
 class Presigner:
     """Build it in a worker thread: resolving credentials may query IMDS or STS."""
 
-    def __init__(
-        self,
-        session: Session,
-        *,
-        region: str,
-        endpoint_url: str | None = None,
-        path_style: bool = False,
-        use_ssl: bool = True,
-    ) -> None:
+    def __init__(self, session: Session, *, region: str, endpoint: Endpoint = AWS_ENDPOINT) -> None:
         self._credentials = session.get_credentials()
         if self._credentials is None:
-            raise RuntimeError("no AWS credentials found")
-        self._client = session.create_client(
-            "s3",
-            region_name=region,
-            endpoint_url=endpoint_url,
-            use_ssl=use_ssl,
-            config=Config(
-                signature_version="s3v4",
-                s3={"addressing_style": "path" if path_style else "virtual"},
-            ),
-        )
+            raise NoCredentialsError
+        self._client = s3_client(session, region, endpoint)
         self._refresh = asyncio.Lock()
 
     async def list_objects_v2(

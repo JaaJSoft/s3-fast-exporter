@@ -15,6 +15,9 @@ dependencies = [
 [project.optional-dependencies]
 uvloop = ["uvloop>=0.23; sys_platform != 'win32' and platform_python_implementation == 'CPython'"]
 
+[project.scripts]
+s3-fast-exporter = "exporter.__main__:main"
+
 [project.urls]
 Source = "https://github.com/JaaJSoft/s3-fast-exporter"
 
@@ -63,7 +66,7 @@ python_version = "3.12"
 files = ["exporter", "fakes3", "scripts", "tests"]
 
 [[tool.mypy.overrides]]
-module = ["botocore.*", "moto.*"]
+module = ["botocore.*", "moto.*", "uvloop"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
