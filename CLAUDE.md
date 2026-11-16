@@ -31,6 +31,8 @@ uv run python -m fakes3 &                # the golden datasets on http://127.0.0
 uv run s3-fast-exporter --s3.endpoint-url=http://127.0.0.1:9000 --s3.force-path-style
 docker compose up --detach --build --wait fakes3 exporter   # the image on :9341
 PARITY_EXPORTER_URL=http://127.0.0.1:9341 uv run pytest tests/test_parity.py
+docker compose -f compose.yaml -f compose.bench.yaml up --detach --build --wait --force-recreate
+uv run python -m scripts.bench_listing   # both exporters, 10k to 10M objects: docs/benchmarks.md
 ```
 
 The image must stay a drop-in replacement: same flags and variables as the `upstream` service of
