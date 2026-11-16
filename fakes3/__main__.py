@@ -1,9 +1,10 @@
 import argparse
+import multiprocessing
+import sys
+from functools import partial
 
-from aiohttp import web
-
-from fakes3.app import create_app
-from fakes3.golden import golden_buckets
+from fakes3.app import RequestCounter
+from fakes3.server import VIRTUAL_BUCKET, serve
 
 
 def main() -> None:
@@ -12,10 +13,33 @@ def main() -> None:
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9000)
-    args = parser.parse_args()
-    web.run_app(
-        create_app(golden_buckets()), host=args.host, port=args.port, print=None, access_log=None
+    parser.add_argument(
+        "--latency-ms", type=float, default=0.0, help="Time S3 takes to answer any request."
     )
+    parser.add_argument(
+        "--virtual-objects",
+        type=int,
+        default=0,
+        help=f"Objects of a bucket named {VIRTUAL_BUCKET}, made up as they are listed.",
+    )
+    parser.add_argument(
+        "--workers", type=int, default=1, help="Processes sharing the port, on Linux."
+    )
+    args = parser.parse_args()
+    if args.workers > 1 and not sys.platform.startswith("linux"):
+        parser.error("--workers: only Linux lets processes share a port")
+    serving = partial(
+        serve,
+        host=args.host,
+        port=args.port,
+        latency=args.latency_ms / 1000,
+        virtual_objects=args.virtual_objects,
+        reuse_port=args.workers > 1,
+        list_requests=RequestCounter(shared=args.workers > 1),
+    )
+    for _ in range(args.workers - 1):
+        multiprocessing.Process(target=serving, daemon=True).start()
+    serving()
 
 
 if __name__ == "__main__":

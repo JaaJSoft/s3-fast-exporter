@@ -1,16 +1,43 @@
+import asyncio
 import base64
 import binascii
+import multiprocessing
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 from aiohttp import web
+from aiohttp.typedefs import Handler, Middleware
 
 from fakes3 import responses
-from fakes3.store import Bucket, list_page
+from fakes3.store import Listable, list_page
+from fakes3.virtual import VirtualBucket
 
 MAX_KEYS = 1000
 REQUEST_ID = "FAKES3REQUEST000"
-BUCKETS: web.AppKey[dict[str, Bucket]] = web.AppKey("buckets")
+LIST_REQUESTS_PATH = "/_fakes3/list-requests"
+
+
+class RequestCounter:
+    """Counts the ListObjectsV2 requests served; a shared one counts across worker processes."""
+
+    def __init__(self, *, shared: bool = False) -> None:
+        self._count = 0
+        self._shared = multiprocessing.Value("Q", 0) if shared else None
+
+    def add(self) -> None:
+        if self._shared is None:
+            self._count += 1
+            return
+        with self._shared.get_lock():
+            self._shared.value += 1
+
+    @property
+    def total(self) -> int:
+        return self._count if self._shared is None else int(self._shared.value)
+
+
+BUCKETS: web.AppKey[dict[str, Listable]] = web.AppKey("buckets")
+LIST_REQUESTS: web.AppKey[RequestCounter] = web.AppKey("list_requests")
 
 
 class InvalidArgumentError(Exception):
@@ -29,14 +56,26 @@ class ListRequest:
     fetch_owner: bool
 
 
-def create_app(buckets: Mapping[str, Bucket]) -> web.Application:
-    app = web.Application()
+def create_app(
+    buckets: Mapping[str, Listable],
+    *,
+    latency: float = 0.0,
+    list_requests: RequestCounter | None = None,
+) -> web.Application:
+    """latency: seconds S3 takes to answer any request."""
+    app = web.Application(middlewares=[_delay(latency)] if latency else [])
     app[BUCKETS] = dict(buckets)
+    app[LIST_REQUESTS] = list_requests or RequestCounter()
+    app.router.add_get(LIST_REQUESTS_PATH, list_request_count, allow_head=False)
     app.router.add_get("/", list_buckets, allow_head=False)
     app.router.add_route("HEAD", "/{bucket}", head_bucket)
     app.router.add_get("/{bucket}", list_objects, allow_head=False)
     app.router.add_get("/{bucket}/", list_objects, allow_head=False)
     return app
+
+
+async def list_request_count(request: web.Request) -> web.Response:
+    return web.Response(text=f"{request.app[LIST_REQUESTS].total}\n")
 
 
 async def list_buckets(request: web.Request) -> web.Response:
@@ -51,6 +90,7 @@ async def head_bucket(request: web.Request) -> web.Response:
 
 
 async def list_objects(request: web.Request) -> web.Response:
+    request.app[LIST_REQUESTS].add()
     name = request.match_info["bucket"]
     bucket = request.app[BUCKETS].get(name)
     if bucket is None:
@@ -61,13 +101,19 @@ async def list_objects(request: web.Request) -> web.Response:
         params = parse_list_request(request.query)
     except InvalidArgumentError as exc:
         return _error(400, "InvalidArgument", str(exc), name)
-    page = list_page(
-        bucket,
-        prefix=params.prefix,
-        delimiter=params.delimiter,
-        after=params.after,
-        max_keys=params.max_keys,
-    )
+    contents = None
+    if isinstance(bucket, VirtualBucket) and not params.delimiter and not params.fetch_owner:
+        page, contents = bucket.fast_page(
+            prefix=params.prefix, after=params.after, max_keys=params.max_keys
+        )
+    else:
+        page = list_page(
+            bucket,
+            prefix=params.prefix,
+            delimiter=params.delimiter,
+            after=params.after,
+            max_keys=params.max_keys,
+        )
     next_token = None if page.resume_after is None else encode_token(page.resume_after)
     return _xml(
         responses.list_objects_v2(
@@ -81,6 +127,7 @@ async def list_objects(request: web.Request) -> web.Response:
             next_token=next_token,
             fetch_owner=params.fetch_owner,
             page=page,
+            contents=contents,
         )
     )
 
@@ -120,6 +167,16 @@ def decode_token(token: str) -> str:
         return base64.b64decode(token.encode(), altchars=b"-_", validate=True).decode()
     except (binascii.Error, UnicodeDecodeError):
         raise InvalidArgumentError("The continuation token provided is incorrect") from None
+
+
+def _delay(latency: float) -> Middleware:
+    @web.middleware
+    async def delay(request: web.Request, handler: Handler) -> web.StreamResponse:
+        if request.path != LIST_REQUESTS_PATH:
+            await asyncio.sleep(latency)
+        return await handler(request)
+
+    return delay
 
 
 def _xml(body: str, status: int = 200) -> web.Response:

@@ -1,3 +1,4 @@
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
@@ -5,10 +6,14 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from servers import moto_server, serve_app
 
-from fakes3.app import create_app
-from fakes3.store import Bucket, StoredObject, list_page
+from fakes3 import responses
+from fakes3.app import LIST_REQUESTS_PATH, create_app
+from fakes3.store import Bucket, Page, StoredObject, list_page
+from fakes3.virtual import VirtualBucket, key_of
 
 DAY = datetime(2026, 11, 1, tzinfo=UTC)
 KEYS = (
@@ -68,6 +73,60 @@ def test_a_common_prefix_is_never_repeated_on_the_next_page() -> None:
 def test_duplicate_keys_are_rejected() -> None:
     with pytest.raises(ValueError, match="duplicate keys"):
         bucket_of("a", "a")
+
+
+VIRTUAL = VirtualBucket("bench", 25_000)
+
+
+def rendered(page: Page, contents: str | None = None) -> str:
+    return responses.list_objects_v2(
+        bucket="bench",
+        prefix="",
+        delimiter="",
+        max_keys=1000,
+        url_encoded=True,
+        start_after="",
+        continuation_token="",
+        next_token=None,
+        fetch_owner=False,
+        page=page,
+        contents=contents,
+    )
+
+
+@settings(max_examples=100, deadline=None)
+@given(
+    st.sampled_from(["", "data/", "data/0000", "data/00001/", "data/00002/00000249", "x"]),
+    st.one_of(
+        st.sampled_from(["", "a", "data/00001/", "data/00001/0000015000.bin~", "z"]),
+        st.integers(0, 26_000).map(key_of),
+    ),
+    st.integers(0, 1000),
+)
+def test_virtual_pages_are_the_pages_of_stored_objects(
+    prefix: str, after: str, max_keys: int
+) -> None:
+    page, contents = VIRTUAL.fast_page(prefix=prefix, after=after, max_keys=max_keys)
+    expected = list_page(VIRTUAL, prefix=prefix, delimiter="", after=after, max_keys=max_keys)
+    assert page.resume_after == expected.resume_after
+    assert rendered(page, contents) == rendered(expected)
+
+
+def test_a_virtual_bucket_lists_its_groups() -> None:
+    top = list_page(VIRTUAL, prefix="", delimiter="/", after="", max_keys=1000)
+    assert (top.contents, top.common_prefixes) == ((), ("data/",))
+    groups = list_page(VIRTUAL, prefix="data/", delimiter="/", after="", max_keys=1000)
+    assert groups.common_prefixes == ("data/00000/", "data/00001/", "data/00002/")
+
+
+def test_latency_delays_answers_and_listings_are_counted() -> None:
+    with serve_app(create_app({"bench": VIRTUAL}, latency=0.05)) as url:
+        started = time.perf_counter()
+        urllib.request.urlopen(f"{url}/bench?list-type=2&max-keys=1").read()
+        assert time.perf_counter() - started >= 0.04
+        urllib.request.urlopen(f"{url}/bench?list-type=2&prefix=data/00001/").read()
+        urllib.request.urlopen(f"{url}/").read()
+        assert urllib.request.urlopen(f"{url}{LIST_REQUESTS_PATH}").read() == b"2\n"
 
 
 @pytest.fixture(scope="module")
