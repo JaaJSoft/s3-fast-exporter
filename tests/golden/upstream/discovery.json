@@ -1,0 +1,1 @@
+[{"targets":["127.0.0.1:9340"],"labels":{"__param_bucket":"empty"}},{"targets":["127.0.0.1:9340"],"labels":{"__param_bucket":"golden"}},{"targets":["127.0.0.1:9340"],"labels":{"__param_bucket":"single"}}]

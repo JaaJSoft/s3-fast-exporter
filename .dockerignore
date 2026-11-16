@@ -1,0 +1,5 @@
+*
+!pyproject.toml
+!uv.lock
+!fakes3/
+**/__pycache__

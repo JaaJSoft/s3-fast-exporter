@@ -1,0 +1,8 @@
+{
+  "image": "ribbybibby/s3-exporter@sha256:c12212b7dd2aa68da2647d4a6b7afd38edffd32e6f3f5b48489025da38e98bbb",
+  "build_info": "s3_exporter_build_info{branch=\"master\",goversion=\"go1.15.15\",revision=\"d5fe50c9ebae5c5130ddd345536d486b5088469e\",version=\"0.5.0\"} 1",
+  "durations": "every s3_list_duration_seconds value is replaced by 0",
+  "crashes": {
+    "missing-bucket": "panic: inconsistent label cardinality: expected 3 label values but got 2 in []string{\"missing\", \"\"}"
+  }
+}

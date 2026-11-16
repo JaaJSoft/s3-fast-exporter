@@ -1,0 +1,40 @@
+import asyncio
+import socket
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+
+from aiohttp import web
+
+
+@contextmanager
+def serve_app(app: web.Application) -> Iterator[str]:
+    loop = asyncio.new_event_loop()
+    runner = web.AppRunner(app, access_log=None)
+    loop.run_until_complete(runner.setup())
+    loop.run_until_complete(web.TCPSite(runner, "127.0.0.1", 0).start())
+    host, port = runner.addresses[0][:2]
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://{host}:{port}"
+    finally:
+        asyncio.run_coroutine_threadsafe(runner.cleanup(), loop).result()
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join()
+        loop.close()
+
+
+@contextmanager
+def moto_server() -> Iterator[str]:
+    from moto.server import ThreadedMotoServer
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    server = ThreadedMotoServer(ip_address="127.0.0.1", port=port, verbose=False)
+    server.start()
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.stop()

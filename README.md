@@ -16,6 +16,7 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy
 uv run pytest
+uv run python -m scripts.record_golden   # needs Docker: re-records tests/golden/upstream
 ```
 
 ## License
