@@ -68,8 +68,14 @@ meant for PyPy.
 ## Releasing
 
 Every merge on master publishes `ghcr.io/jaajsoft/s3-fast-exporter:edge` for amd64 and arm64.
-For a release, set `version` in `pyproject.toml`, merge, then push the tag `vX.Y.Z` on that
-commit: CI refuses a tag that differs from the version and publishes `X.Y.Z`, `X.Y` and `latest`.
+A release is cut from an up-to-date, clean master:
+
+```sh
+uv run python -m scripts.release X.Y.Z   # sets the version, commits "release: vX.Y.Z", tags it
+git push --atomic origin master vX.Y.Z
+```
+
+CI refuses a tag that differs from the project version, and publishes `X.Y.Z`, `X.Y` and `latest`.
 
 ## Writing
 
