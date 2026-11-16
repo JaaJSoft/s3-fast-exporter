@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local design notes (roadmap, ADRs), deliberately kept out of the repository
+docs/ROADMAP.md
+docs/adr/
