@@ -11,6 +11,7 @@ from exporter.s3.lister import Lister, RetryPolicy, S3Error
 from exporter.s3.proxies import Proxies
 from exporter.s3.regions import Regions
 from exporter.s3.scanner import ProtocolError
+from exporter.s3.throttle import Throttle
 from exporter.scan import Listing, balanced_bounds, discover_bounds, scan
 from exporter.stats import ListingStats
 
@@ -87,7 +88,8 @@ class Prober:
         started = time.perf_counter()
         try:
             presigner = await self._regions.presigner_for(listing.bucket)
-            lister = Lister(self._http, presigner, self._retry, self._proxies)
+            throttle = Throttle(self._concurrency)
+            lister = Lister(self._http, presigner, self._retry, self._proxies, throttle)
             bounds = self._bounds.get(listing)
             if bounds is None and self._concurrency > 1 and not listing.delimiter:
                 bounds = await discover_bounds(lister, listing, self._concurrency)

@@ -2,6 +2,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
 
@@ -11,7 +12,14 @@ from hypothesis import strategies as st
 from servers import moto_server, serve_app
 
 from fakes3 import responses
-from fakes3.app import LIST_REQUESTS_PATH, create_app
+from fakes3.app import (
+    LIST_REQUESTS_PATH,
+    SLOW_DOWNS_PATH,
+    InFlight,
+    RequestCounter,
+    SlowDown,
+    create_app,
+)
 from fakes3.store import Bucket, Page, StoredObject, list_page
 from fakes3.virtual import VirtualBucket, key_of
 
@@ -127,6 +135,25 @@ def test_latency_delays_answers_and_listings_are_counted() -> None:
         urllib.request.urlopen(f"{url}/bench?list-type=2&prefix=data/00001/").read()
         urllib.request.urlopen(f"{url}/").read()
         assert urllib.request.urlopen(f"{url}{LIST_REQUESTS_PATH}").read() == b"2\n"
+
+
+def test_requests_past_the_limit_in_flight_get_503_slow_down() -> None:
+    slow_down = SlowDown(InFlight(1), RequestCounter())
+
+    def status(url: str) -> tuple[int, bytes]:
+        try:
+            with urllib.request.urlopen(url) as answer:
+                return answer.status, b""
+        except urllib.error.HTTPError as error:
+            return error.code, error.read()
+
+    with serve_app(create_app({"bench": VIRTUAL}, latency=0.2, slow_down=slow_down)) as url:
+        with ThreadPoolExecutor(2) as pool:
+            answers = sorted(pool.map(status, [f"{url}/bench?list-type=2&max-keys=1"] * 2))
+        slow_downs = urllib.request.urlopen(f"{url}{SLOW_DOWNS_PATH}").read()
+    assert [code for code, _ in answers] == [200, 503]
+    assert b"<Code>SlowDown</Code>" in answers[1][1]
+    assert slow_downs == b"1\n"
 
 
 @pytest.fixture(scope="module")

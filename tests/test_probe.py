@@ -14,7 +14,7 @@ from exporter.s3.presigner import Endpoint, Presigner
 from exporter.s3.regions import Regions
 from exporter.scan import Listing
 from exporter.stats import ListingStats
-from fakes3.app import RequestCounter, create_app
+from fakes3.app import InFlight, RequestCounter, SlowDown, create_app
 from fakes3.golden import golden_buckets
 from fakes3.store import Listable
 from fakes3.virtual import DATE, VirtualBucket, second_of, size_of
@@ -152,6 +152,22 @@ def test_a_probe_fails_at_its_timeout_while_the_scan_goes_on(aws_session: Sessio
     assert finished.stats is not None
     assert finished.stats.objects == 3000
     assert requests.total == 5
+
+
+def test_scans_slow_down_when_s3_answers_503(aws_session: Session) -> None:
+    # S3 answers 503 SlowDown past 3 requests in flight, and later scans run 8 ranges at once:
+    # at a fixed pace, their requests would run out of attempts.
+    requests, slow_downs = RequestCounter(), RequestCounter()
+    throttled = create_app(
+        {"bench": VirtualBucket("bench", OBJECTS)},
+        latency=0.02,
+        list_requests=requests,
+        slow_down=SlowDown(InFlight(3), slow_downs),
+    )
+    with serve_app(throttled) as url:
+        done = probes(aws_session, (url, requests), BENCH, BENCH, BENCH)
+    assert all(result.stats == expected_stats() for result, _ in done)
+    assert 0 < slow_downs.total <= 36
 
 
 def test_closing_cancels_the_scans_in_flight(aws_session: Session) -> None:

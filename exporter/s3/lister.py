@@ -1,5 +1,6 @@
 import asyncio
 import random
+import sys
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 
@@ -9,8 +10,11 @@ from yarl import URL
 from exporter.s3.presigner import Presigner
 from exporter.s3.proxies import Proxies
 from exporter.s3.scanner import ListPage, scan_error, scan_list_page
+from exporter.s3.throttle import Throttle
 
 RETRYABLE_STATUSES = frozenset({500, 502, 503, 504})
+# S3 answers 503 SlowDown past the request rate it accepts.
+SLOW_DOWN = 503
 
 
 class S3Error(Exception):
@@ -38,11 +42,13 @@ class Lister:
         presigner: Presigner,
         retry: RetryPolicy | None = None,
         proxies: Proxies | None = None,
+        throttle: Throttle | None = None,
     ) -> None:
         self._http = http
         self._presigner = presigner
         self._retry = retry or RetryPolicy()
         self._proxies = proxies
+        self._throttle = throttle or Throttle(sys.maxsize)
 
     async def pages(
         self, bucket: str, *, prefix: str = "", delimiter: str = "", start_after: str = ""
@@ -68,17 +74,21 @@ class Lister:
         proxy = None if self._proxies is None else self._proxies(target)
         attempt = 1
         while True:
-            try:
-                async with self._http.get(target, proxy=proxy) as response:
-                    body = await response.read()
-            except (aiohttp.ClientError, TimeoutError):
-                if attempt >= self._retry.attempts:
-                    raise
-            else:
-                if response.status == 200:
-                    return body
-                error = S3Error(response.status, *scan_error(body))
-                if response.status not in RETRYABLE_STATUSES or attempt >= self._retry.attempts:
-                    raise error
+            async with self._throttle.request() as pace:
+                try:
+                    async with self._http.get(target, proxy=proxy) as response:
+                        body = await response.read()
+                except (aiohttp.ClientError, TimeoutError):
+                    if attempt >= self._retry.attempts:
+                        raise
+                else:
+                    if response.status == 200:
+                        self._throttle.answered()
+                        return body
+                    if response.status == SLOW_DOWN:
+                        self._throttle.slowed_down(pace)
+                    error = S3Error(response.status, *scan_error(body))
+                    if response.status not in RETRYABLE_STATUSES or attempt >= self._retry.attempts:
+                        raise error
             await asyncio.sleep(self._retry.delay(attempt))
             attempt += 1
