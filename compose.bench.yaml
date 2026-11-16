@@ -1,0 +1,28 @@
+# The benchmark setup, over compose.yaml: S3 answers in 60 ms, the bench bucket holds 10M objects,
+# and each exporter gets one core.
+#
+#   docker compose -f compose.yaml -f compose.bench.yaml up --detach --build --wait --force-recreate
+#   uv run python -m scripts.bench_listing
+#
+# A health check starts a Python process: every 2 seconds, it would take CPU from the exporter it
+# checks, so they only run often while the services start.
+services:
+  fakes3:
+    command:
+      - --latency-ms=${FAKES3_LATENCY_MS:-60}
+      - --virtual-objects=10000000
+      - --workers=8
+    healthcheck:
+      interval: 10m
+      start_period: 1m
+      start_interval: 1s
+
+  upstream:
+    cpus: 1
+
+  exporter:
+    cpus: 1
+    healthcheck:
+      interval: 10m
+      start_period: 1m
+      start_interval: 1s

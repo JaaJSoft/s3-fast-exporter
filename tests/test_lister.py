@@ -14,6 +14,7 @@ from servers import moto_server, serve_app
 
 from exporter.s3.lister import Lister, RetryPolicy, S3Error
 from exporter.s3.presigner import Endpoint, Presigner
+from exporter.s3.proxies import Proxies
 from exporter.s3.scanner import ListPage
 from fakes3 import responses
 from fakes3.app import create_app
@@ -48,11 +49,17 @@ def presigner_for(session: Session, url: str) -> RecordingPresigner:
 
 
 def collect(
-    presigner: Presigner, bucket: str, *, retry: RetryPolicy = NO_DELAY, **listing: str
+    presigner: Presigner,
+    bucket: str,
+    *,
+    retry: RetryPolicy = NO_DELAY,
+    proxies: Proxies | None = None,
+    **listing: str,
 ) -> list[ListPage]:
     async def run() -> list[ListPage]:
         async with aiohttp.ClientSession() as http:
-            return [page async for page in Lister(http, presigner, retry).pages(bucket, **listing)]
+            lister = Lister(http, presigner, retry, proxies)
+            return [page async for page in lister.pages(bucket, **listing)]
 
     return asyncio.run(run())
 
@@ -133,6 +140,25 @@ def test_presigned_urls_reach_s3_byte_for_byte(
     collect(presigner, "bucket", prefix=prefix, delimiter=delimiter, start_after=start_after)
     signed = urlsplit(presigner.urls[-1])
     assert targets[-1] == f"{signed.path}?{signed.query}"
+
+
+def test_listings_go_through_the_proxy_of_their_host(aws_session: Session) -> None:
+    targets: list[tuple[str, str | None]] = []
+
+    async def forward(request: web.Request) -> web.Response:
+        targets.append((str(request.url), request.headers.get("Proxy-Authorization")))
+        return web.Response(body=EMPTY_LISTING, content_type="application/xml")
+
+    proxy = web.Application()
+    proxy.router.add_get("/{path:.*}", forward)
+    with serve_app(proxy) as proxy_url:
+        proxies = Proxies({"http": proxy_url.replace("//", "//user:secret@")})
+        presigner = presigner_for(aws_session, "http://s3.invalid:9000")
+        pages = collect(presigner, "bucket", proxies=proxies)
+    assert pages == [ListPage([], [], [], None)]
+    [(url, credentials)] = targets
+    assert url.startswith("http://s3.invalid:9000/bucket?list-type=2&")
+    assert credentials == "Basic dXNlcjpzZWNyZXQ="
 
 
 def flaky(failures: int) -> web.Application:

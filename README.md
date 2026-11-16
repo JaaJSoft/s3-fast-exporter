@@ -5,8 +5,9 @@ Prometheus exporter for S3 buckets and objects. It exposes the same metrics as
 maintained, and replaces it without touching dashboards or alerts: same flags, same environment
 variables, same port, same metrics.
 
-Status: version 0.1 behaves like the upstream exporter and, like it, lists each prefix
-sequentially. Parallel listing for large buckets is in progress.
+Large prefixes are listed in parallel: with S3 answering in 60 ms, a million objects take 1.6
+seconds on one core, where the upstream exporter takes 75 seconds. See
+[docs/benchmarks.md](docs/benchmarks.md).
 
 ## Quick start
 
@@ -51,6 +52,7 @@ The image can also be built from this repository with `docker build -t s3-fast-e
 | `--s3.endpoint-url` | `S3_EXPORTER_S3_ENDPOINT_URL` | AWS | URL of another S3 service |
 | `--s3.force-path-style` | `S3_EXPORTER_S3_FORCE_PATH_STYLE` | off | path-style URLs instead of virtual-hosted buckets |
 | `--s3.disable-ssl` | `S3_EXPORTER_S3_DISABLE_SSL` | off | HTTP instead of HTTPS |
+| `--s3.list-concurrency` | `S3_EXPORTER_S3_LIST_CONCURRENCY` | `64` | most ListObjectsV2 requests one probe sends at once |
 | `--log.level` | `S3_EXPORTER_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` or `fatal` |
 | `--log.format` | `S3_EXPORTER_LOG_FORMAT` | `logfmt` | `logfmt` or `json` |
 
@@ -68,6 +70,22 @@ the probed buckets, and `s3:ListAllMyBuckets` for `/discovery`.
 
 Only the S3 API as AWS documents it is supported: a response that departs from it is reported as
 a failed listing, never read approximately.
+
+## How a probe lists
+
+S3 lists keys in order, and can start a listing after any key. A probe splits its prefix into key
+ranges and lists them at once, up to `--s3.list-concurrency` requests at a time:
+
+- the first probe of a prefix splits it along its top-level "folders", the common prefixes of a
+  listing with the `/` delimiter;
+- each later probe splits it along the pages of the previous listing, into ranges of as many
+  objects each, so that it sends as many requests as a single listing would.
+
+Small prefixes, of a few pages, are listed in one go. A range sends at most one request more than
+a single listing would, so a probe costs at most a few requests more, and usually none.
+
+Probes of the same bucket, prefix and delimiter that arrive while a listing runs wait for it and
+share its result.
 
 ## Metrics
 
@@ -146,6 +164,9 @@ Two values differ on purpose:
 Other changes:
 
 - Buckets outside the default region now work; upstream failed on them.
+- Prefixes are listed in parallel ranges, and probes arriving during the listing of the same
+  bucket, prefix and delimiter share its result, `s3_list_duration_seconds` included.
+- `--s3.list-concurrency` is new.
 - `AWS_SDK_LOAD_CONFIG` is no longer needed: shared AWS files are always read. Upstream's
   `-e HOME=/ -v $HOME/.aws:/.aws` keeps working.
 - `/metrics` shows this exporter's process and Python metrics instead of Go's.
@@ -169,7 +190,7 @@ docker compose up --build exporter upstream
 
 The last command runs this exporter on port 9341 and the upstream one on port 9340, both against
 `fakes3`, a deterministic S3 server with the test datasets, so that their answers can be
-compared side by side.
+compared side by side. [docs/benchmarks.md](docs/benchmarks.md) explains how to benchmark them.
 
 ## License
 

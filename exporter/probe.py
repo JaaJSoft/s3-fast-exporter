@@ -1,14 +1,18 @@
-import calendar
+import asyncio
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 
 import aiohttp
 from botocore.exceptions import BotoCoreError, ClientError
 
 from exporter.s3.lister import Lister, RetryPolicy, S3Error
+from exporter.s3.proxies import Proxies
 from exporter.s3.regions import Regions
-from exporter.s3.scanner import ListPage, ProtocolError
+from exporter.s3.scanner import ProtocolError
+from exporter.scan import Listing, balanced_bounds, discover_bounds, scan
+from exporter.stats import ListingStats
 
 log = logging.getLogger(__name__)
 
@@ -20,68 +24,82 @@ LISTING_ERRORS = (
     BotoCoreError,
     ClientError,
 )
-
-
-@dataclass(slots=True)
-class ListingStats:
-    objects: int = 0
-    total_size: int = 0
-    biggest_size: int = 0
-    newest_date: bytes = b""
-    newest_size: int = 0
-    common_prefixes: int = 0
-
-    def add(self, page: ListPage) -> None:
-        sizes, dates = page.sizes, page.last_modified
-        if sizes:
-            self.objects += len(sizes)
-            self.total_size += sum(sizes)
-            self.biggest_size = max(self.biggest_size, max(sizes))
-            # max() returns the first maximum, and later pages only win when strictly newer:
-            # among objects with the same date, the first listed one wins, as upstream.
-            newest = max(range(len(dates)), key=dates.__getitem__)
-            if dates[newest] > self.newest_date:
-                self.newest_date = dates[newest]
-                self.newest_size = sizes[newest]
-        self.common_prefixes += len(page.common_prefixes)
-
-    def newest_epoch(self) -> int:
-        """Whole seconds, as upstream truncates them; 0 when nothing was listed."""
-        if not self.newest_date:
-            return 0
-        moment = time.strptime(self.newest_date[:19].decode(), "%Y-%m-%dT%H:%M:%S")
-        return calendar.timegm(moment)
+REMEMBERED_LISTINGS = 4096
 
 
 @dataclass(frozen=True, slots=True)
 class ProbeResult:
-    bucket: str
-    prefix: str
-    delimiter: str
+    listing: Listing
     stats: ListingStats | None
     duration: float
 
 
-async def run_probe(
-    http: aiohttp.ClientSession,
-    regions: Regions,
-    retry: RetryPolicy,
-    *,
-    bucket: str,
-    prefix: str,
-    delimiter: str,
-) -> ProbeResult:
-    started = time.perf_counter()
-    stats = ListingStats()
-    try:
-        lister = Lister(http, await regions.presigner_for(bucket), retry)
-        async for page in lister.pages(bucket, prefix=prefix, delimiter=delimiter):
-            stats.add(page)
-    except LISTING_ERRORS as error:
-        regions.forget(bucket)
-        log.warning(
-            "listing failed",
-            extra={"bucket": bucket, "prefix": prefix, "delimiter": delimiter, "error": str(error)},
-        )
-        return ProbeResult(bucket, prefix, delimiter, None, time.perf_counter() - started)
-    return ProbeResult(bucket, prefix, delimiter, stats, time.perf_counter() - started)
+class Prober:
+    """Scans listings, each split along the page ends of its previous scan.
+
+    A listing has one scan at a time: probes arriving while it runs share its result.
+    """
+
+    def __init__(
+        self,
+        http: aiohttp.ClientSession,
+        regions: Regions,
+        retry: RetryPolicy,
+        *,
+        concurrency: int,
+        proxies: Proxies | None = None,
+        remembered: int = REMEMBERED_LISTINGS,
+    ) -> None:
+        self._http = http
+        self._regions = regions
+        self._retry = retry
+        self._proxies = proxies
+        self._concurrency = concurrency
+        self._remembered = remembered
+        self._scans: dict[Listing, asyncio.Task[ProbeResult]] = {}
+        self._bounds: OrderedDict[Listing, list[str]] = OrderedDict()
+
+    async def probe(self, listing: Listing) -> ProbeResult:
+        running = self._scans.get(listing)
+        if running is None:
+            running = asyncio.create_task(self._scan(listing))
+            self._scans[listing] = running
+            running.add_done_callback(lambda _: self._scans.pop(listing, None))
+        # shield: a probe that gives up must not cancel the scan others are waiting for.
+        return await asyncio.shield(running)
+
+    async def close(self) -> None:
+        running = list(self._scans.values())
+        for task in running:
+            task.cancel()
+        await asyncio.gather(*running, return_exceptions=True)
+
+    async def _scan(self, listing: Listing) -> ProbeResult:
+        started = time.perf_counter()
+        try:
+            presigner = await self._regions.presigner_for(listing.bucket)
+            lister = Lister(self._http, presigner, self._retry, self._proxies)
+            bounds = self._bounds.get(listing)
+            if bounds is None and self._concurrency > 1 and not listing.delimiter:
+                bounds = await discover_bounds(lister, listing, self._concurrency)
+            result = await scan(lister, listing, bounds or ())
+        except LISTING_ERRORS as error:
+            self._regions.forget(listing.bucket)
+            log.warning(
+                "listing failed",
+                extra={
+                    "bucket": listing.bucket,
+                    "prefix": listing.prefix,
+                    "delimiter": listing.delimiter,
+                    "error": str(error),
+                },
+            )
+            return ProbeResult(listing, None, time.perf_counter() - started)
+        self._remember(listing, balanced_bounds(result, self._concurrency))
+        return ProbeResult(listing, result.stats, time.perf_counter() - started)
+
+    def _remember(self, listing: Listing, bounds: list[str]) -> None:
+        self._bounds[listing] = bounds
+        self._bounds.move_to_end(listing)
+        if len(self._bounds) > self._remembered:
+            self._bounds.popitem(last=False)

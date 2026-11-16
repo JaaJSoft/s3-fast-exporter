@@ -4,7 +4,7 @@ from hashlib import md5
 from urllib.parse import quote
 from xml.sax.saxutils import escape
 
-from fakes3.store import Bucket, Page, StoredObject
+from fakes3.store import Listable, Page, StoredObject
 
 NAMESPACE = "http://s3.amazonaws.com/doc/2006-03-01/"
 OWNER_ID = "fakes3"
@@ -24,7 +24,9 @@ def list_objects_v2(
     next_token: str | None,
     fetch_owner: bool,
     page: Page,
+    contents: str | None = None,
 ) -> str:
+    """contents: the page's <Contents> elements, when the caller has them rendered already."""
     encode: Callable[[str], str] = _url_encode if url_encoded else _identity
     parts = [
         f'{PROLOG}<ListBucketResult xmlns="{NAMESPACE}">',
@@ -44,7 +46,10 @@ def list_objects_v2(
         parts.append(_element("ContinuationToken", continuation_token))
     if start_after:
         parts.append(_element("StartAfter", encode(start_after)))
-    parts.extend(_contents(obj, encode, fetch_owner) for obj in page.contents)
+    if contents is None:
+        parts.extend(_contents(obj, encode, fetch_owner) for obj in page.contents)
+    else:
+        parts.append(contents)
     parts.extend(
         f"<CommonPrefixes>{_element('Prefix', encode(common))}</CommonPrefixes>"
         for common in page.common_prefixes
@@ -53,7 +58,7 @@ def list_objects_v2(
     return "".join(parts)
 
 
-def list_all_my_buckets(buckets: Iterable[Bucket]) -> str:
+def list_all_my_buckets(buckets: Iterable[Listable]) -> str:
     entries = "".join(
         "<Bucket>"
         + _element("Name", bucket.name)

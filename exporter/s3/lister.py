@@ -1,12 +1,13 @@
 import asyncio
 import random
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 
 import aiohttp
 from yarl import URL
 
 from exporter.s3.presigner import Presigner
+from exporter.s3.proxies import Proxies
 from exporter.s3.scanner import ListPage, scan_error, scan_list_page
 
 RETRYABLE_STATUSES = frozenset({500, 502, 503, 504})
@@ -32,15 +33,20 @@ class RetryPolicy:
 
 class Lister:
     def __init__(
-        self, http: aiohttp.ClientSession, presigner: Presigner, retry: RetryPolicy | None = None
+        self,
+        http: aiohttp.ClientSession,
+        presigner: Presigner,
+        retry: RetryPolicy | None = None,
+        proxies: Proxies | None = None,
     ) -> None:
         self._http = http
         self._presigner = presigner
         self._retry = retry or RetryPolicy()
+        self._proxies = proxies
 
     async def pages(
         self, bucket: str, *, prefix: str = "", delimiter: str = "", start_after: str = ""
-    ) -> AsyncIterator[ListPage]:
+    ) -> AsyncGenerator[ListPage, None]:
         token: str | None = None
         while True:
             url = await self._presigner.list_objects_v2(
@@ -57,11 +63,13 @@ class Lister:
             token = page.next_token
 
     async def _get(self, url: str) -> bytes:
+        # encoded=True: re-quoting the presigned URL would invalidate its signature.
+        target = URL(url, encoded=True)
+        proxy = None if self._proxies is None else self._proxies(target)
         attempt = 1
         while True:
             try:
-                # encoded=True: re-quoting the presigned URL would invalidate its signature.
-                async with self._http.get(URL(url, encoded=True)) as response:
+                async with self._http.get(target, proxy=proxy) as response:
                     body = await response.read()
             except (aiohttp.ClientError, TimeoutError):
                 if attempt >= self._retry.attempts:

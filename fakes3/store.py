@@ -1,7 +1,8 @@
 from bisect import bisect_left, bisect_right
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Protocol
 
 DEFAULT_CREATED = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -12,6 +13,23 @@ class StoredObject:
     size: int
     last_modified: datetime
     storage_class: str = "STANDARD"
+
+
+class Indexed[T](Protocol):
+    def __len__(self) -> int: ...
+    def __getitem__(self, index: int, /) -> T: ...
+
+
+class Listable(Protocol):
+    name: str
+    region: str
+    created: datetime
+
+    @property
+    def objects(self) -> Indexed[StoredObject]: ...
+
+    @property
+    def sort_keys(self) -> Indexed[bytes]: ...
 
 
 class Bucket:
@@ -37,12 +55,12 @@ class Bucket:
 
 @dataclass(frozen=True, slots=True)
 class Page:
-    contents: tuple[StoredObject, ...]
+    contents: Sequence[StoredObject]
     common_prefixes: tuple[str, ...]
     resume_after: str | None
 
 
-def list_page(bucket: Bucket, *, prefix: str, delimiter: str, after: str, max_keys: int) -> Page:
+def list_page(bucket: Listable, *, prefix: str, delimiter: str, after: str, max_keys: int) -> Page:
     keys = bucket.sort_keys
     encoded_prefix = prefix.encode()
     encoded_after = after.encode()
@@ -66,10 +84,15 @@ def list_page(bucket: Bucket, *, prefix: str, delimiter: str, after: str, max_ke
             # entry: one that sorts before it (after points inside its group) is not returned.
             if encoded_common > encoded_after:
                 common_prefixes.append(common)
-            while index < len(keys) and keys[index].startswith(encoded_common):
-                index += 1
+            index = bisect_left(keys, past(encoded_common), index)
         last_key = bucket.objects[index - 1].key
     return Page(tuple(contents), tuple(common_prefixes), None)
+
+
+def past(prefix: bytes) -> bytes:
+    """The smallest byte string above every byte string that starts with prefix."""
+    # UTF-8 never uses the bytes 0xF5 to 0xFF, so the last byte can always go up by one.
+    return prefix[:-1] + bytes([prefix[-1] + 1])
 
 
 def common_prefix(key: str, prefix: str, delimiter: str) -> str | None:

@@ -1,52 +1,41 @@
 from datetime import UTC, datetime
+from typing import Any
 from urllib.parse import unquote_plus
 
 import pytest
 from botocore import parsers
 from botocore.handlers import decode_list_object_v2
 from botocore.session import get_session
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
+from listings import render_pages
 
-from exporter.s3.scanner import ListPage, ProtocolError, scan_error, scan_list_page
+from exporter.s3.scanner import (
+    ListPage,
+    ProtocolError,
+    decode,
+    group_end,
+    scan_error,
+    scan_list_page,
+)
 from fakes3 import responses
-from fakes3.app import encode_token
 from fakes3.golden import PROBES, Probe, golden_buckets
-from fakes3.store import Bucket, StoredObject, list_page
+from fakes3.store import Bucket, StoredObject
 
 OPERATION = get_session().get_service_model("s3").operation_model("ListObjectsV2")
 
 type View = tuple[list[int], list[str], list[str], str | None]
 
 
-def render_pages(bucket: Bucket, *, prefix: str, delimiter: str, max_keys: int) -> list[bytes]:
-    bodies = []
-    after = ""
-    while True:
-        page = list_page(bucket, prefix=prefix, delimiter=delimiter, after=after, max_keys=max_keys)
-        token = None if page.resume_after is None else encode_token(page.resume_after)
-        body = responses.list_objects_v2(
-            bucket=bucket.name,
-            prefix=prefix,
-            delimiter=delimiter,
-            max_keys=max_keys,
-            url_encoded=True,
-            start_after="",
-            continuation_token="",
-            next_token=token,
-            fetch_owner=False,
-            page=page,
-        )
-        bodies.append(body.encode())
-        if page.resume_after is None:
-            return bodies
-        after = page.resume_after
+def botocore_parse(body: bytes) -> dict[str, Any]:
+    response = {"body": body, "headers": {}, "status_code": 200}
+    parsed: dict[str, Any] = parsers.RestXMLParser().parse(response, OPERATION.output_shape)
+    decode_list_object_v2(parsed, context={"encoding_type_auto_set": True})
+    return parsed
 
 
 def botocore_view(body: bytes) -> View:
-    response = {"body": body, "headers": {}, "status_code": 200}
-    parsed = parsers.RestXMLParser().parse(response, OPERATION.output_shape)
-    decode_list_object_v2(parsed, context={"encoding_type_auto_set": True})
+    parsed = botocore_parse(body)
     contents = parsed.get("Contents", [])
     return (
         [obj["Size"] for obj in contents],
@@ -101,6 +90,78 @@ def test_random_pages_read_like_botocore(
         assert scanner_view(scan_list_page(body)) == botocore_view(body)
 
 
+@settings(max_examples=300, deadline=None)
+@given(
+    objects,
+    st.sampled_from(["", "a", "é", "/"]),
+    st.sampled_from(["", "/", "a", "é"]),
+    st.integers(1, 8),
+    keys,
+)
+def test_pages_start_end_and_cut_where_botocore_names_say(
+    objects: list[tuple[str, int, datetime]],
+    prefix: str,
+    delimiter: str,
+    max_keys: int,
+    bound: str,
+) -> None:
+    bucket = Bucket("bucket", (StoredObject(key, size, date) for key, size, date in objects))
+    for body in render_pages(bucket, prefix=prefix, delimiter=delimiter, max_keys=max_keys):
+        page, parsed = scan_list_page(body), botocore_parse(body)
+        contents = parsed.get("Contents", [])
+        names = [obj["Key"] for obj in contents]
+        groups = [common["Prefix"] for common in parsed.get("CommonPrefixes", [])]
+        assert page.start() == min(names[:1] + groups[:1], default=None)
+        entries = [(name, False) for name in names[-1:]] + [(group, True) for group in groups[-1:]]
+        assert page.last() == max(entries, default=None)
+        cut = page.up_to(bound)
+        assert cut.sizes == [obj["Size"] for obj in contents if obj["Key"] <= bound]
+        assert [decode(group) for group in cut.common_prefixes] == [g for g in groups if g <= bound]
+        assert cut.next_token is None
+
+
+@settings(max_examples=300)
+@given(keys, st.text(st.characters(codec="utf-8"), max_size=5))
+def test_a_group_ends_above_all_its_keys(prefix: str, suffix: str) -> None:
+    end = group_end(prefix)
+    assume(end is not None)
+    assert end is not None
+    assert prefix + suffix < end
+    assert not end.startswith(prefix)
+    assert end.encode()
+
+
+@pytest.mark.parametrize(
+    ("prefix", "end"),
+    [
+        ("a/", "a0"),
+        ("logs/11/", "logs/110"),
+        ("a\U0010ffff", "b"),
+        ("\ud7ff", "\ue000"),
+        ("\U0010ffff", None),
+    ],
+)
+def test_group_ends(prefix: str, end: str | None) -> None:
+    assert group_end(prefix) == end
+
+
+@pytest.mark.parametrize(
+    ("listed", "name"),
+    [
+        (b"a+b%2Bc", "a b+c"),
+        (b"caf%C3%A9/%F0%9F%99%82", "café/🙂"),
+        (b"a%26b&amp;c&#39;", "a&b&c'"),
+    ],
+)
+def test_listed_names_decode_as_botocore_decodes_them(listed: bytes, name: str) -> None:
+    assert decode(listed) == name
+
+
+def test_a_listed_name_that_is_not_utf8_is_a_protocol_error() -> None:
+    with pytest.raises(ProtocolError, match="UTF-8"):
+        decode(b"caf%E9")
+
+
 EMPTY = (
     b'<?xml version="1.0" encoding="UTF-8"?>\n'
     b'<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
@@ -150,3 +211,11 @@ def test_error_documents_give_their_code_and_message() -> None:
     body = responses.error("SlowDown", "Please reduce your request rate & retry", "b", "id")
     assert scan_error(body.encode()) == ("SlowDown", "Please reduce your request rate & retry")
     assert scan_error(b"<html>Bad Gateway</html>") == ("", "")
+
+
+def test_an_object_without_key_cannot_bound_a_range() -> None:
+    page = scan_list_page(ONE.replace(b"<Key>a</Key>", b""))
+    with pytest.raises(ProtocolError, match="<Key>"):
+        page.last()
+    with pytest.raises(ProtocolError, match="<Key>"):
+        page.up_to("b")
