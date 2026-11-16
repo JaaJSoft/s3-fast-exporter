@@ -10,8 +10,10 @@ a well-designed Python service can be fast.
   A value difference must be deliberate, covered by the golden tests and documented for users.
 - Standard S3 API only. A response that breaks the protocol is a scan error, never
   silently partial data. No vendor-specific workaround.
-- No AWS SDK at runtime. S3 access goes through `exporter.s3`; botocore is a test oracle.
-- Runtime dependencies: aiohttp, prometheus-client, optional uvloop. Adding one needs an explicit agreement first.
+- botocore owns credentials, endpoints and signing (presigned URLs) and makes the rare calls.
+  Listings never go through its HTTP stack or parser: aiohttp fetches, `exporter.s3.scanner` reads.
+- Runtime dependencies: aiohttp, botocore, prometheus-client, optional uvloop. Adding one needs an
+  explicit agreement first.
 - The code runs on CPython >= 3.12 and on PyPy 3.12.
 
 ## Commands
@@ -24,10 +26,11 @@ uv run mypy
 uv run pytest
 uv run --no-default-groups --group test --python pypy3.12 pytest
 uv run python -m scripts.record_golden   # needs Docker: re-records tests/golden/upstream
+uv run python -m scripts.bench_scanner   # scanner against botocore's parser, per page
 ```
 
-mypy and the `oracle` group (moto, botocore) need CPython with prebuilt wheels: only the `test`
-group is meant for PyPy.
+mypy and the `oracle` group (moto) need CPython with prebuilt wheels: only the `test` group is
+meant for PyPy.
 
 ## Code
 
@@ -47,7 +50,8 @@ group is meant for PyPy.
 
 ## Tests
 
-- The scanner and the signer are checked against botocore (differential tests).
+- The scanner is checked against botocore's parser on generated listings (hypothesis), and
+  presigned URLs must reach the server byte for byte.
 - A partitioned listing must give the same result as a sequential one for any partition
   boundaries (hypothesis).
 - Integration tests use moto in server mode.
