@@ -3,11 +3,11 @@
 ## Probes, against the upstream exporter
 
 `fakes3` plays an S3 that answers every request after 60 ms, a latency typical of a page of
-1000 keys on AWS. Its `bench` bucket holds 10 million made-up objects, named
-`data/{i // 10000:05d}/{i:010d}.bin`, so that each decade from 10 thousand to 10 million objects
-is a prefix. It runs 8 worker processes, so that it never slows the exporters down. Each exporter
-gets one core, except `exporter-processes`, which lists with `--s3.list-processes=4` on four
-cores.
+1000 keys on AWS. Its `bench` bucket holds 100 million made-up objects, named
+`data/{i // 10000:05d}/{i:010d}.bin`, so that each decade from 10 thousand to 100 million objects
+is a prefix, and 100 million objects sit in 10,000 folders. It runs 8 worker processes, so that
+it never slows the exporters down. Each exporter gets one core, except `exporter-processes`,
+which lists with `--s3.list-processes=4` on four cores.
 
 ```sh
 docker compose -f compose.yaml -f compose.bench.yaml up --detach --build --wait --force-recreate
@@ -16,8 +16,8 @@ uv run python -m scripts.bench_listing
 
 The script probes each prefix once, then several more times: the first probe of a prefix splits
 it along its top-level "folders", later probes along the pages of the previous listing. It checks
-that the exporters report the same values. The upstream exporter is not probed on 10 million
-objects: a probe would take about 12 minutes.
+that the exporters report the same values. The upstream exporter is not probed past a million
+objects: 10 million would take 12 minutes, and 100 million two hours.
 
 Results of 2026-11-16, on an AMD Ryzen 9 5950X under Docker Desktop, s3-fast-exporter on
 CPython 3.15 with uvloop. Durations are medians of the later probes. From one session to
@@ -25,45 +25,58 @@ another, they vary by up to 20% on this machine: compare them within a table.
 
 | Objects | upstream | s3-fast-exporter | s3-fast-exporter, 4 processes |
 |---|---|---|---|
-| 10 thousand | 745 ms | 328 ms | 329 ms |
-| 100 thousand | 7.44 s | 302 ms | 303 ms |
-| 1 million | 74.1 s | 1.47 s | 555 ms |
-| 10 million | | 15.0 s | 4.99 s |
+| 10 thousand | 731 ms | 335 ms | 335 ms |
+| 100 thousand | 7.30 s | 298 ms | 300 ms |
+| 1 million | 72.8 s | 1.47 s | 553 ms |
+| 10 million | | 14.8 s | 4.40 s |
+| 100 million | | 147 s | 43.9 s |
 
 The first probe of each prefix:
 
 | Objects | s3-fast-exporter | s3-fast-exporter, 4 processes |
 |---|---|---|
-| 10 thousand | 751 ms | 850 ms |
-| 100 thousand | 832 ms | 813 ms |
-| 1 million | 1.81 s | 1.48 s |
-| 10 million | 15.1 s | 4.90 s |
+| 10 thousand | 747 ms | 828 ms |
+| 100 thousand | 811 ms | 804 ms |
+| 1 million | 1.78 s | 1.13 s |
+| 10 million | 14.5 s | 4.84 s |
+| 100 million | 150 s | 41.6 s |
 
 What a probe costs:
 
 | Objects | Requests: upstream / s3-fast-exporter | First probe: 1 process / 4 | CPU: upstream / 1 process / 4 | Peak RSS: upstream / 1 process / 4 |
 |---|---|---|---|---|
-| 10 thousand | 10 / 10 | 11 / 11 | 260 ms / 18 ms / 18 ms | 32 / 76 / 346 MiB |
-| 100 thousand | 100 / 100 | 110 / 110 | 2.59 s / 142 ms / 179 ms | 33 / 85 / 429 MiB |
-| 1 million | 1000 / 1000 | 1064 / 1100 | 25.0 s / 1.44 s / 1.69 s | 34 / 105 / 500 MiB |
-| 10 million | - / 10000 | 10064 / 10256 | - / 14.8 s / 17.9 s | - / 107 / 512 MiB |
+| 10 thousand | 10 / 10 | 11 / 11 | 225 ms / 17 ms / 17 ms | 32 / 76 / 345 MiB |
+| 100 thousand | 100 / 100 | 110 / 110 | 2.22 s / 137 ms / 167 ms | 33 / 85 / 427 MiB |
+| 1 million | 1000 / 1000 | 1064 / 1100 | 21.9 s / 1.37 s / 1.55 s | 34 / 101 / 497 MiB |
+| 10 million | - / 10000 | 10064 / 10256 | - / 14.6 s / 15.5 s | - / 105 / 507 MiB |
+| 100 million | - / 100000 | 100649 / 102569 | - / 147 s / 162 s | - / 123 / 549 MiB |
 
 - Once it knows a prefix, s3-fast-exporter sends as many requests as a single listing: its ranges
-  end where pages ended. A first probe sends one request to find the folders, and each range
-  but the last reads one page into the next folder. Four processes list four times as many
-  ranges at once, hence more of those pages.
-- The upstream exporter spends 25 ms of CPU on each page, reading it with the AWS SDK for Go:
+  end where pages ended. A first probe reads the folders a page of a thousand at a time, and each
+  range but the last reads one page into the next folder: 100 million objects in 10,000 folders
+  cost 10 requests for the folders and 2.6% more pages with four processes, which list in four
+  times as many ranges.
+- The upstream exporter spends 22 ms of CPU on each page, reading it with the AWS SDK for Go:
   even listing one page at a time, it needs a third of its core.
-- Four processes list 10 million objects 3 times as fast as one, for a fifth more CPU: each
+- Four processes list 100 million objects 3.4 times as fast as one, for a tenth more CPU: each
   range costs a little, and so does handing it to a worker process and merging what comes back.
-- Each process takes about 100 MiB: four workers and the exporter's process reach 512 MiB.
+- Each process takes about 100 MiB: four workers and the exporter's process reach 549 MiB.
+
+### Scrape timeouts
+
+Prometheus gives up on a scrape after its `scrape_timeout`, 10 seconds by default, and a probe
+answers `s3_list_success 0` half a second before. At about 1.5 seconds of CPU per million objects,
+one core lists some 6 million objects in 10 seconds, four cores some 20 million. A larger prefix
+needs a longer timeout, with some room, on a job of its own: 3 minutes for 100 million objects on
+one core, a minute on four.
 
 ## When S3 slows down
 
 With `FAKES3_SLOW_DOWN_ABOVE=32`, fakes3 answers `503 SlowDown` past 32 requests in flight, so
 that it lists at most about 530 pages a second. Each process of s3-fast-exporter halves the
 requests it sends to the bucket on a 503, sends the request again after a pause, and raises the
-pace by one for each round of answers. Same session as above:
+pace by one for each round of answers. In an earlier session, with the 10 million objects
+under `data/`:
 
 | Objects | s3-fast-exporter | 503 answers per probe | 4 processes | 503 answers per probe |
 |---|---|---|---|---|
