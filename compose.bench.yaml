@@ -1,4 +1,4 @@
-# The benchmark setup, over compose.yaml: S3 answers in 60 ms, the bench bucket holds 10M objects,
+# The benchmark setup, over compose.yaml: S3 answers in 60 ms, the bench bucket holds 100M objects,
 # and each exporter gets one core, but exporter-processes, which gets four.
 #
 #   docker compose -f compose.yaml -f compose.bench.yaml up --detach --build --wait --force-recreate
@@ -12,7 +12,7 @@ services:
   fakes3:
     command:
       - --latency-ms=${FAKES3_LATENCY_MS:-60}
-      - --virtual-objects=10000000
+      - --virtual-objects=100000000
       - --slow-down-above=${FAKES3_SLOW_DOWN_ABOVE:-0}
       - --workers=8
     healthcheck:
