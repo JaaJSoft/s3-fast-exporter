@@ -7,6 +7,7 @@ accepted from one scan to the next.
 """
 
 import asyncio
+from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import partial
@@ -23,6 +24,8 @@ from exporter.scan import Listing, Scan, scan, scan_range
 
 # A range whose worker stopped is listed by another one, once: a second loss points at the range.
 LOST_ATTEMPTS = 2
+# Probes name any bucket: the paces kept are those of the buckets probed last.
+REMEMBERED_BUCKETS = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +51,7 @@ class LocalWorker:
         concurrency: int,
         retry: RetryPolicy | None = None,
         proxies: Proxies | None = None,
+        remembered: int = REMEMBERED_BUCKETS,
     ) -> None:
         """concurrency: most requests in flight to a bucket."""
         self._http = http
@@ -55,15 +59,24 @@ class LocalWorker:
         self._concurrency = concurrency
         self._retry = retry or RetryPolicy()
         self._proxies = proxies
-        self._throttles: dict[str, Throttle] = {}
+        self._remembered = remembered
+        self._throttles: OrderedDict[str, Throttle] = OrderedDict()
 
-    async def lister(self, bucket: str, region: str) -> Lister:
-        """A lister whose requests wait in the bucket's queue."""
+    def throttle(self, bucket: str) -> Throttle:
+        """The bucket's queue."""
         throttle = self._throttles.get(bucket)
         if throttle is None:
             throttle = self._throttles[bucket] = Throttle(self._concurrency)
+            if len(self._throttles) > self._remembered:
+                self._throttles.popitem(last=False)
+        else:
+            self._throttles.move_to_end(bucket)
+        return throttle
+
+    async def lister(self, bucket: str, region: str) -> Lister:
+        """A lister whose requests wait in the bucket's queue."""
         presigner = await self._regions.presigner(region)
-        return Lister(self._http, presigner, self._retry, self._proxies, throttle)
+        return Lister(self._http, presigner, self._retry, self._proxies, self.throttle(bucket))
 
     async def list(self, job: RangeJob) -> Scan:
         lister = await self.lister(job.listing.bucket, job.region)
