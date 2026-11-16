@@ -27,6 +27,8 @@ uv run pytest
 uv run --no-default-groups --group test --python pypy3.12 pytest
 uv run python -m scripts.record_golden   # needs Docker: re-records tests/golden/upstream
 uv run python -m scripts.bench_scanner   # scanner against botocore's parser, per page
+uv run python -m fakes3 &                # the golden datasets on http://127.0.0.1:9000
+uv run s3-fast-exporter --s3.endpoint-url=http://127.0.0.1:9000 --s3.force-path-style
 ```
 
 mypy and the `oracle` group (moto) need CPython with prebuilt wheels: only the `test` group is
