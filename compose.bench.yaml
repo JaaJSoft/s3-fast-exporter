@@ -1,8 +1,10 @@
 # The benchmark setup, over compose.yaml: S3 answers in 60 ms, the bench bucket holds 10M objects,
-# and each exporter gets one core.
+# and each exporter gets one core, but exporter-processes, which gets four.
 #
 #   docker compose -f compose.yaml -f compose.bench.yaml up --detach --build --wait --force-recreate
 #   uv run python -m scripts.bench_listing
+#
+# FAKES3_SLOW_DOWN_ABOVE=N makes S3 answer 503 SlowDown past N requests in flight.
 #
 # A health check starts a Python process: every 2 seconds, it would take CPU from the exporter it
 # checks, so they only run often while the services start.
@@ -11,6 +13,7 @@ services:
     command:
       - --latency-ms=${FAKES3_LATENCY_MS:-60}
       - --virtual-objects=10000000
+      - --slow-down-above=${FAKES3_SLOW_DOWN_ABOVE:-0}
       - --workers=8
     healthcheck:
       interval: 10m
@@ -26,3 +29,30 @@ services:
       interval: 10m
       start_period: 1m
       start_interval: 1s
+
+  exporter-processes:
+    image: s3-fast-exporter:dev
+    command:
+      - --s3.endpoint-url=http://fakes3:9000
+      - --s3.force-path-style
+      - --s3.disable-ssl
+      - --s3.list-processes=4
+    environment:
+      AWS_ACCESS_KEY_ID: fakes3
+      AWS_SECRET_ACCESS_KEY: fakes3
+      AWS_REGION: us-east-1
+    ports:
+      - "127.0.0.1:9342:9340"
+    cpus: 4
+    healthcheck:
+      test: ["CMD", "/opt/venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9340/-/healthy')"]
+      interval: 10m
+      timeout: 2s
+      retries: 15
+      start_period: 1m
+      start_interval: 1s
+    depends_on:
+      fakes3:
+        condition: service_healthy
+      exporter:
+        condition: service_started

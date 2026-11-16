@@ -14,7 +14,9 @@ from fakes3.virtual import VirtualBucket
 
 MAX_KEYS = 1000
 REQUEST_ID = "FAKES3REQUEST000"
-LIST_REQUESTS_PATH = "/_fakes3/list-requests"
+COUNTERS = "/_fakes3/"
+LIST_REQUESTS_PATH = COUNTERS + "list-requests"
+SLOW_DOWNS_PATH = COUNTERS + "slow-downs"
 
 
 class RequestCounter:
@@ -36,8 +38,45 @@ class RequestCounter:
         return self._count if self._shared is None else int(self._shared.value)
 
 
+class InFlight:
+    """Requests being answered, up to a limit; a shared one counts across worker processes."""
+
+    def __init__(self, limit: int, *, shared: bool = False) -> None:
+        self._limit = limit
+        self._count = 0
+        self._shared = multiprocessing.Value("Q", 0) if shared else None
+
+    def enter(self) -> bool:
+        if self._shared is None:
+            if self._count >= self._limit:
+                return False
+            self._count += 1
+            return True
+        with self._shared.get_lock():
+            if self._shared.value >= self._limit:
+                return False
+            self._shared.value += 1
+            return True
+
+    def leave(self) -> None:
+        if self._shared is None:
+            self._count -= 1
+            return
+        with self._shared.get_lock():
+            self._shared.value -= 1
+
+
+@dataclass(frozen=True, slots=True)
+class SlowDown:
+    """S3's request rate limit, as a number of requests in flight past which it answers 503."""
+
+    in_flight: InFlight
+    answered: RequestCounter
+
+
 BUCKETS: web.AppKey[dict[str, Listable]] = web.AppKey("buckets")
 LIST_REQUESTS: web.AppKey[RequestCounter] = web.AppKey("list_requests")
+SLOW_DOWNS: web.AppKey[RequestCounter] = web.AppKey("slow_downs")
 
 
 class InvalidArgumentError(Exception):
@@ -61,12 +100,16 @@ def create_app(
     *,
     latency: float = 0.0,
     list_requests: RequestCounter | None = None,
+    slow_down: SlowDown | None = None,
 ) -> web.Application:
     """latency: seconds S3 takes to answer any request."""
-    app = web.Application(middlewares=[_delay(latency)] if latency else [])
+    middlewares = [] if slow_down is None else [_slow_down(slow_down, latency)]
+    app = web.Application(middlewares=[*middlewares, _delay(latency)] if latency else middlewares)
     app[BUCKETS] = dict(buckets)
     app[LIST_REQUESTS] = list_requests or RequestCounter()
+    app[SLOW_DOWNS] = RequestCounter() if slow_down is None else slow_down.answered
     app.router.add_get(LIST_REQUESTS_PATH, list_request_count, allow_head=False)
+    app.router.add_get(SLOW_DOWNS_PATH, slow_down_count, allow_head=False)
     app.router.add_get("/", list_buckets, allow_head=False)
     app.router.add_route("HEAD", "/{bucket}", head_bucket)
     app.router.add_get("/{bucket}", list_objects, allow_head=False)
@@ -76,6 +119,10 @@ def create_app(
 
 async def list_request_count(request: web.Request) -> web.Response:
     return web.Response(text=f"{request.app[LIST_REQUESTS].total}\n")
+
+
+async def slow_down_count(request: web.Request) -> web.Response:
+    return web.Response(text=f"{request.app[SLOW_DOWNS].total}\n")
 
 
 async def list_buckets(request: web.Request) -> web.Response:
@@ -172,11 +219,29 @@ def decode_token(token: str) -> str:
 def _delay(latency: float) -> Middleware:
     @web.middleware
     async def delay(request: web.Request, handler: Handler) -> web.StreamResponse:
-        if request.path != LIST_REQUESTS_PATH:
+        if not request.path.startswith(COUNTERS):
             await asyncio.sleep(latency)
         return await handler(request)
 
     return delay
+
+
+def _slow_down(slow_down: SlowDown, latency: float) -> Middleware:
+    @web.middleware
+    async def answer_503(request: web.Request, handler: Handler) -> web.StreamResponse:
+        if request.path.startswith(COUNTERS):
+            return await handler(request)
+        if not slow_down.in_flight.enter():
+            slow_down.answered.add()
+            await asyncio.sleep(latency)
+            bucket = request.match_info.get("bucket", "")
+            return _error(503, "SlowDown", "Please reduce your request rate.", bucket)
+        try:
+            return await handler(request)
+        finally:
+            slow_down.in_flight.leave()
+
+    return answer_503
 
 
 def _xml(body: str, status: int = 200) -> web.Response:

@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import AsyncGenerator, Iterator
 from datetime import UTC, datetime, timedelta
+from functools import partial
 
 import pytest
 from hypothesis import example, given, settings
@@ -11,10 +12,12 @@ from exporter.s3.scanner import ListPage, ProtocolError
 from exporter.scan import (
     MIN_PAGES_PER_RANGE,
     Listing,
+    RangeLister,
     Scan,
     balanced_bounds,
     discover_bounds,
     scan,
+    scan_range,
 )
 from fakes3.store import Bucket, StoredObject, common_prefix
 
@@ -46,6 +49,10 @@ def bucket_of(objects: list[tuple[str, int, int]]) -> Bucket:
     )
 
 
+def listed(source: StoreSource, listing: Listing) -> RangeLister:
+    return partial(scan_range, source, listing)
+
+
 def named(*keys: str) -> Bucket:
     return bucket_of([(key, len(key), 0) for key in keys])
 
@@ -71,8 +78,8 @@ def test_any_bounds_give_the_result_of_a_single_listing(
 ) -> None:
     source = StoreSource(bucket_of(objects), max_keys=max_keys)
     listing = Listing("bucket", prefix, delimiter)
-    single = loop.run(scan(source, listing))
-    split = loop.run(scan(source, listing, bounds))
+    single = loop.run(scan(listed(source, listing)))
+    split = loop.run(scan(listed(source, listing), bounds))
     assert split.stats == single.stats
     assert split.entries == single.entries
 
@@ -95,28 +102,43 @@ def test_learned_bounds_never_fall_inside_a_group(
     groups = groups_of(bucket, listing)
     bounds: list[str] = []
     for _ in range(3):
-        result = loop.run(scan(source, listing, bounds))
+        result = loop.run(scan(listed(source, listing), bounds))
         bounds = balanced_bounds(result, ranges)
         assert [bound for bound in bounds if any(map(bound.startswith, groups))] == []
 
 
 def test_learned_ranges_are_even_and_cost_no_extra_request(loop: asyncio.Runner) -> None:
     source = StoreSource(named(*(f"k{number:04d}" for number in range(100))), max_keys=2)
-    single = loop.run(scan(source, LISTING))
+    single = loop.run(scan(listed(source, LISTING)))
     assert (source.requests, single.pages) == (50, 50)
 
     bounds = balanced_bounds(single, 4)
     assert bounds == ["k0023", "k0049", "k0073"]
     source.requests = 0
-    split = loop.run(scan(source, LISTING, bounds))
+    split = loop.run(scan(listed(source, LISTING), bounds))
     assert source.requests == 50
     assert split.stats == single.stats
     assert balanced_bounds(split, 4) == bounds
 
 
+@pytest.mark.parametrize("ranges", range(2, 12))
+def test_scans_after_a_discovered_one_cost_the_requests_of_a_single_listing(
+    loop: asyncio.Runner, ranges: int
+) -> None:
+    # Six groups of three pages each: the first scan splits at the groups, and each of its
+    # ranges reads one page into the next group. Later scans split at page ends only.
+    source = StoreSource(named(*(f"{group}/{key:02d}" for group in "abcdef" for key in range(12))))
+    source.max_keys = 4
+    single = loop.run(scan(listed(source, LISTING)))
+    first = loop.run(scan(listed(source, LISTING), loop.run(discover_bounds(source, LISTING, 64))))
+    source.requests = 0
+    loop.run(scan(listed(source, LISTING), balanced_bounds(first, ranges)))
+    assert source.requests == single.pages
+
+
 def test_listings_of_few_pages_are_not_split(loop: asyncio.Runner) -> None:
     source = StoreSource(named(*"abcdefgh"), max_keys=1)
-    result = loop.run(scan(source, LISTING))
+    result = loop.run(scan(listed(source, LISTING)))
     assert result.pages == 2 * MIN_PAGES_PER_RANGE
     assert balanced_bounds(result, 8) == ["d"]
     result.pages -= 1
@@ -160,4 +182,4 @@ class IgnoringStartAfter(StoreSource):
 def test_a_server_ignoring_start_after_fails_the_scan(loop: asyncio.Runner) -> None:
     source = IgnoringStartAfter(named("a", "b", "c"))
     with pytest.raises(ProtocolError, match="StartAfter"):
-        loop.run(scan(source, LISTING, ["b"]))
+        loop.run(scan(listed(source, LISTING), ["b"]))

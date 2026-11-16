@@ -1,22 +1,24 @@
 import asyncio
+import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 
 import aiohttp
 import pytest
 from botocore.session import Session
+from listings import virtual_stats
 from servers import serve_app
 
 from exporter.probe import REMEMBERED_LISTINGS, Prober, ProbeResult
+from exporter.ranges import LocalWorker, RangeQueue
 from exporter.s3.lister import RetryPolicy
 from exporter.s3.presigner import Endpoint, Presigner
 from exporter.s3.regions import Regions
 from exporter.scan import Listing
-from exporter.stats import ListingStats
-from fakes3.app import RequestCounter, create_app
+from fakes3.app import InFlight, RequestCounter, SlowDown, create_app
 from fakes3.golden import golden_buckets
 from fakes3.store import Listable
-from fakes3.virtual import DATE, VirtualBucket, second_of, size_of
+from fakes3.virtual import VirtualBucket
 
 OBJECTS = 40_000
 BENCH = Listing("bench", "data/")
@@ -38,10 +40,9 @@ async def prober(
         return Presigner(session, region=region, endpoint=Endpoint(url, path_style=True))
 
     async with aiohttp.ClientSession() as http:
-        regions = Regions(new_presigner, "us-east-1")
-        probing = Prober(
-            http, regions, RetryPolicy(base_delay=0), concurrency=8, remembered=remembered
-        )
+        regions = Regions(new_presigner)
+        local = LocalWorker(http, regions, concurrency=8, retry=RetryPolicy(base_delay=0))
+        probing = Prober(regions, local, RangeQueue([(local, 8)]), remembered=remembered)
         yield probing
         await probing.close()
 
@@ -66,19 +67,6 @@ def probes(
     return asyncio.run(run())
 
 
-def expected_stats() -> ListingStats:
-    newest = max(range(OBJECTS), key=second_of)
-    second = second_of(newest)
-    return ListingStats(
-        objects=OBJECTS,
-        total_size=sum(map(size_of, range(OBJECTS))),
-        biggest_size=max(map(size_of, range(OBJECTS))),
-        newest_date=f"{DATE}T{second // 3600:02d}:{second // 60 % 60:02d}:{second % 60:02d}"
-        f".000Z".encode(),
-        newest_size=size_of(newest),
-    )
-
-
 def test_each_scan_splits_along_the_page_ends_of_the_previous_one(
     aws_session: Session, fakes3: tuple[str, RequestCounter]
 ) -> None:
@@ -86,7 +74,7 @@ def test_each_scan_splits_along_the_page_ends_of_the_previous_one(
     # One request finds the four groups of data/, then each of the first three ranges reads
     # one page into the next group. Later scans cut 8 ranges at page ends: no request is lost.
     assert [requests for _, requests in (first, second, third)] == [44, 40, 40]
-    assert first[0].stats == second[0].stats == third[0].stats == expected_stats()
+    assert first[0].stats == second[0].stats == third[0].stats == virtual_stats(OBJECTS)
 
 
 def test_probes_arriving_during_a_scan_share_it(
@@ -127,6 +115,47 @@ def test_a_failed_listing_has_no_stats(
     [(result, _)] = probes(aws_session, fakes3, Listing("missing"))
     assert result.listing == Listing("missing")
     assert result.stats is None
+
+
+def test_a_probe_fails_at_its_timeout_while_the_scan_goes_on(aws_session: Session) -> None:
+    requests = RequestCounter()
+    slow_s3 = create_app(
+        {"bench": VirtualBucket("bench", 3000)}, latency=0.2, list_requests=requests
+    )
+
+    async def run() -> tuple[ProbeResult, float, ProbeResult]:
+        async with prober(aws_session, url) as probing:
+            started = time.perf_counter()
+            gave_up = await probing.probe(BENCH, wait=0.1)
+            waited = time.perf_counter() - started
+            return gave_up, waited, await probing.probe(BENCH)
+
+    with serve_app(slow_s3) as url:
+        gave_up, waited, finished = asyncio.run(run())
+    assert gave_up.stats is None
+    assert waited < 0.2
+    # The second probe waited for the scan the first one started: two requests to discover
+    # data/, then three pages.
+    assert finished.stats is not None
+    assert finished.stats.objects == 3000
+    assert requests.total == 5
+
+
+def test_scans_keep_the_pace_s3_accepts(aws_session: Session) -> None:
+    # S3 answers 503 SlowDown past 3 requests in flight, and later scans run 8 ranges at once.
+    # The bucket's queue keeps the pace from one scan to the next: each scan meets a few 503
+    # answers, as the pace probes for room, never a burst of them.
+    requests, slow_downs = RequestCounter(), RequestCounter()
+    throttled = create_app(
+        {"bench": VirtualBucket("bench", OBJECTS)},
+        latency=0.02,
+        list_requests=requests,
+        slow_down=SlowDown(InFlight(3), slow_downs),
+    )
+    with serve_app(throttled) as url:
+        done = probes(aws_session, (url, requests), BENCH, BENCH, BENCH)
+    assert all(result.stats == virtual_stats(OBJECTS) for result, _ in done)
+    assert 0 < slow_downs.total <= 24
 
 
 def test_closing_cancels_the_scans_in_flight(aws_session: Session) -> None:

@@ -10,7 +10,7 @@ class Regions:
     def __init__(
         self,
         new_presigner: Callable[[str], Presigner],
-        default_region: str,
+        default_region: str = "us-east-1",
         lookup: Callable[[str], str | None] | None = None,
     ) -> None:
         self._new_presigner = new_presigner
@@ -21,7 +21,9 @@ class Regions:
         self._lock = asyncio.Lock()
 
     async def presigner_for(self, bucket: str) -> Presigner:
-        region = await self._region_of(bucket)
+        return await self.presigner(await self.region_of(bucket))
+
+    async def presigner(self, region: str) -> Presigner:
         presigner = self._presigners.get(region)
         if presigner is None:
             async with self._lock:
@@ -34,7 +36,7 @@ class Regions:
     def forget(self, bucket: str) -> None:
         self._bucket_regions.pop(bucket, None)
 
-    async def _region_of(self, bucket: str) -> str:
+    async def region_of(self, bucket: str) -> str:
         if self._lookup is None:
             return self._default_region
         lookup = self._bucket_regions.get(bucket)

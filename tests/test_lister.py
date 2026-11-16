@@ -28,6 +28,9 @@ EMPTY_LISTING = (
     b"<EncodingType>url</EncodingType><IsTruncated>false</IsTruncated></ListBucketResult>"
 )
 SLOW_DOWN = responses.error("SlowDown", "Please reduce your request rate.", "bucket", "id")
+INTERNAL_ERROR = responses.error(
+    "InternalError", "We encountered an internal error.", "bucket", "id"
+)
 NO_DELAY = RetryPolicy(attempts=4, base_delay=0)
 
 type Entries = tuple[list[int], list[bytes], list[bytes]]
@@ -161,13 +164,14 @@ def test_listings_go_through_the_proxy_of_their_host(aws_session: Session) -> No
     assert credentials == "Basic dXNlcjpzZWNyZXQ="
 
 
-def flaky(failures: int) -> web.Application:
+def flaky(failures: int, status: int = 500) -> web.Application:
     remaining = [failures]
+    error = SLOW_DOWN if status == 503 else INTERNAL_ERROR
 
     async def respond(request: web.Request) -> web.Response:
         if remaining[0] > 0:
             remaining[0] -= 1
-            return web.Response(status=503, text=SLOW_DOWN, content_type="application/xml")
+            return web.Response(status=status, text=error, content_type="application/xml")
         return web.Response(body=EMPTY_LISTING, content_type="application/xml")
 
     app = web.Application()
@@ -183,7 +187,12 @@ def test_server_errors_are_retried(aws_session: Session) -> None:
 def test_retries_give_up_after_the_last_attempt(aws_session: Session) -> None:
     with serve_app(flaky(failures=4)) as url, pytest.raises(S3Error) as error:
         collect(presigner_for(aws_session, url), "bucket")
-    assert (error.value.status, error.value.code) == (503, "SlowDown")
+    assert (error.value.status, error.value.code) == (500, "InternalError")
+
+
+def test_requests_slowed_down_wait_until_s3_takes_them(aws_session: Session) -> None:
+    with serve_app(flaky(failures=50, status=503)) as url:
+        assert collect(presigner_for(aws_session, url), "bucket") == [ListPage([], [], [], None)]
 
 
 def test_connection_failures_are_retried_then_raised(aws_session: Session) -> None:

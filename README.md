@@ -5,9 +5,9 @@ Prometheus exporter for S3 buckets and objects. It exposes the same metrics as
 maintained, and replaces it without touching dashboards or alerts: same flags, same environment
 variables, same port, same metrics.
 
-Large prefixes are listed in parallel: with S3 answering in 60 ms, a million objects take 1.6
-seconds on one core, where the upstream exporter takes 75 seconds. See
-[docs/benchmarks.md](docs/benchmarks.md).
+Large prefixes are listed in parallel: with S3 answering in 60 ms, a million objects take 1.5
+seconds on one core, where the upstream exporter takes 74 seconds, and ten million take 5 seconds
+on four cores. See [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Quick start
 
@@ -52,7 +52,8 @@ The image can also be built from this repository with `docker build -t s3-fast-e
 | `--s3.endpoint-url` | `S3_EXPORTER_S3_ENDPOINT_URL` | AWS | URL of another S3 service |
 | `--s3.force-path-style` | `S3_EXPORTER_S3_FORCE_PATH_STYLE` | off | path-style URLs instead of virtual-hosted buckets |
 | `--s3.disable-ssl` | `S3_EXPORTER_S3_DISABLE_SSL` | off | HTTP instead of HTTPS |
-| `--s3.list-concurrency` | `S3_EXPORTER_S3_LIST_CONCURRENCY` | `64` | most ListObjectsV2 requests one probe sends at once |
+| `--s3.list-concurrency` | `S3_EXPORTER_S3_LIST_CONCURRENCY` | `64` | most ListObjectsV2 requests a listing process sends to a bucket at once |
+| `--s3.list-processes` | `S3_EXPORTER_S3_LIST_PROCESSES` | `1` | processes that list, each using up to a core; past 1, worker processes list |
 | `--log.level` | `S3_EXPORTER_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` or `fatal` |
 | `--log.format` | `S3_EXPORTER_LOG_FORMAT` | `logfmt` | `logfmt` or `json` |
 
@@ -74,7 +75,7 @@ a failed listing, never read approximately.
 ## How a probe lists
 
 S3 lists keys in order, and can start a listing after any key. A probe splits its prefix into key
-ranges and lists them at once, up to `--s3.list-concurrency` requests at a time:
+ranges and lists them at once:
 
 - the first probe of a prefix splits it along its top-level "folders", the common prefixes of a
   listing with the `/` delimiter;
@@ -86,6 +87,24 @@ a single listing would, so a probe costs at most a few requests more, and usuall
 
 Probes of the same bucket, prefix and delimiter that arrive while a listing runs wait for it and
 share its result.
+
+The ranges of every probe wait in one queue, for a process that lists them: the exporter's own,
+or with `--s3.list-processes` set to N, N worker processes. A listing takes about 1.5 seconds of
+CPU per million objects, and each process lists up to `--s3.list-concurrency` ranges at once:
+four processes on four cores list 10 million objects 3 times as fast as one. Give the container
+as many cores, and about 100 MiB of memory per process. A worker process that stops hands its
+ranges back to the queue, and starts again.
+
+In each process, the requests to a bucket wait in a queue too, which sends up to
+`--s3.list-concurrency` of them at once. When S3 answers `503 SlowDown`, the request goes back to
+the queue after a short pause, and the queue sends half as many requests at once; each round of
+answers raises that by one, as TCP adapts to a network. The queue keeps the pace S3 accepts from
+one probe to the next.
+
+Prometheus sends its scrape timeout with each scrape. A probe still listing half a second before
+it answers `s3_list_success 0` and logs a warning, so that Prometheus records an answer rather than
+a failed scrape. The listing goes on: probes arriving meanwhile share its result, and the next
+listing of the prefix splits along its pages.
 
 ## Metrics
 
@@ -166,7 +185,9 @@ Other changes:
 - Buckets outside the default region now work; upstream failed on them.
 - Prefixes are listed in parallel ranges, and probes arriving during the listing of the same
   bucket, prefix and delimiter share its result, `s3_list_duration_seconds` included.
-- `--s3.list-concurrency` is new.
+- `--s3.list-concurrency` and `--s3.list-processes` are new.
+- A probe that would outlast Prometheus' scrape timeout answers `s3_list_success 0` just before
+  it. Upstream kept listing, and Prometheus recorded a failed scrape (`up` at 0) instead.
 - `AWS_SDK_LOAD_CONFIG` is no longer needed: shared AWS files are always read. Upstream's
   `-e HOME=/ -v $HOME/.aws:/.aws` keeps working.
 - `/metrics` shows this exporter's process and Python metrics instead of Go's.

@@ -8,10 +8,10 @@ exactly what a single listing gives.
 
 import asyncio
 from bisect import bisect_left
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from exporter.s3.scanner import ListPage, ProtocolError, decode, group_end
 from exporter.stats import ListingStats
@@ -57,14 +57,18 @@ class Scan:
         self.pages += later.pages
 
 
-async def scan(source: PageSource, listing: Listing, bounds: Sequence[str] = ()) -> Scan:
-    """Lists the ranges between the bounds concurrently, and merges them."""
+# Lists the range (after, until] of a listing; until None is the end of the listing.
+type RangeLister = Callable[[str, str | None], Coroutine[Any, Any, Scan]]
+
+
+async def scan(list_range: RangeLister, bounds: Sequence[str] = ()) -> Scan:
+    """Lists the ranges between the bounds concurrently, and merges them in key order."""
     # Overlapping ranges would count entries twice: the bounds must be sorted and distinct.
     ordered = sorted(set(bounds))
     try:
         async with asyncio.TaskGroup() as group:
             ranges = [
-                group.create_task(_scan_range(source, listing, after, until))
+                group.create_task(list_range(after, until))
                 for after, until in zip(["", *ordered], [*ordered, None], strict=True)
             ]
     except ExceptionGroup as failures:
@@ -75,7 +79,7 @@ async def scan(source: PageSource, listing: Listing, bounds: Sequence[str] = ())
     return total
 
 
-async def _scan_range(source: PageSource, listing: Listing, after: str, until: str | None) -> Scan:
+async def scan_range(source: PageSource, listing: Listing, after: str, until: str | None) -> Scan:
     part = Scan()
     pages = source.pages(
         listing.bucket, prefix=listing.prefix, delimiter=listing.delimiter, start_after=after
@@ -130,6 +134,9 @@ def balanced_bounds(scan: Scan, ranges: int) -> list[str]:
             nearest -= 1
         if nearest < 0:
             continue
+        # A range that ends inside a page adds a sample at its bound, with the count of the page
+        # end before it: a range ending at that page end needs no page past its bound.
+        nearest = bisect_left(counts, counts[nearest])
         end, count = scan.samples[nearest]
         if 0 < count < scan.entries and (not bounds or end > bounds[-1]):
             bounds.append(end)

@@ -21,6 +21,7 @@ FAKES3 = "http://127.0.0.1:9000"
 EXPORTERS = {
     "upstream": ("upstream", "http://127.0.0.1:9340"),
     "s3-fast-exporter": ("exporter", "http://127.0.0.1:9341"),
+    "s3-fast-exporter x4": ("exporter-processes", "http://127.0.0.1:9342"),
 }
 # Prefixes of the bench bucket, by number of objects, and how many times each is probed.
 LISTINGS = {
@@ -37,18 +38,21 @@ VALUES = (
     "s3_last_modified_object_size_bytes",
 )
 CLOCK_TICKS = 100
+# Every process of the container, one line each: its stat, then its peak resident memory.
+PROCESSES = 'for p in /proc/[0-9]*; do echo "$(cat $p/stat) $(grep VmHWM $p/status)"; done'
 
 
 @dataclass(frozen=True, slots=True)
 class Probe:
     seconds: float
     requests: int
+    slow_downs: int
     values: dict[str, float]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Probe the bench bucket through both exporters, and compare."
+        description="Probe the bench bucket through the exporters, and compare."
     )
     parser.add_argument("--listings", default=",".join(LISTINGS), help="Sizes to probe.")
     parser.add_argument(
@@ -62,10 +66,10 @@ def main() -> None:
 
     print(environment())
     print(
-        "| Objects | Exporter | First probe | Median | Slowest | Requests | CPU per probe "
-        "| Peak RSS |"
+        "| Objects | Exporter | First probe | Median | Slowest | Requests | 503 answers "
+        "| CPU per probe | Peak RSS |"
     )
-    print("|---|---|---|---|---|---|---|---|")
+    print("|---|---|---|---|---|---|---|---|---|")
     expected: dict[str, dict[str, float]] = {}
     for name in args.exporters.split(","):
         service, url = EXPORTERS[name]
@@ -82,17 +86,19 @@ def main() -> None:
                     raise SystemExit(f"{name} {size}: {each.values} != {expected[size]}")
             times = sorted(each.seconds for each in probes)
             requests = statistics.mean(each.requests for each in probes)
+            slow_downs = statistics.mean(each.slow_downs for each in probes)
             print(
                 f"| {size} | {name} | {seconds(first.seconds)} ({first.requests} requests) "
                 f"| {seconds(statistics.median(times))} | {seconds(times[-1])} "
-                f"| {requests:.0f} | {seconds((cpu_after - cpu_before) / len(probes))} "
+                f"| {requests:.0f} | {slow_downs:.0f} "
+                f"| {seconds((cpu_after - cpu_before) / len(probes))} "
                 f"| {peak / 2**20:.0f} MiB |",
                 flush=True,
             )
 
 
 def probe(url: str, prefix: str) -> Probe:
-    before = list_requests()
+    before, slowed_before = counter("list-requests"), counter("slow-downs")
     query = urllib.parse.urlencode({"bucket": "bench", "prefix": prefix})
     started = time.perf_counter()
     with urllib.request.urlopen(f"{url}/probe?{query}", timeout=3600) as response:
@@ -106,25 +112,36 @@ def probe(url: str, prefix: str) -> Probe:
     }
     if len(values) != len(VALUES):
         raise SystemExit(f"the probe of {prefix} failed:\n{body}")
-    return Probe(elapsed, list_requests() - before, values)
+    return Probe(
+        elapsed,
+        counter("list-requests") - before,
+        counter("slow-downs") - slowed_before,
+        values,
+    )
 
 
-def list_requests() -> int:
-    with urllib.request.urlopen(f"{FAKES3}/_fakes3/list-requests") as response:
+def counter(name: str) -> int:
+    with urllib.request.urlopen(f"{FAKES3}/_fakes3/{name}") as response:
         return int(response.read())
 
 
 def process_stats(service: str) -> tuple[float, int]:
-    """CPU seconds and peak resident bytes of the main process of a compose service."""
+    """CPU seconds and peak resident bytes of the processes of a compose service, summed."""
     container = run("docker", "compose", "ps", "--quiet", service).strip()
-    proc = run(
-        "docker", "run", "--rm", f"--pid=container:{container}", "busybox",
-        "cat", "/proc/1/stat", "/proc/1/status",
+    lines = run(
+        "docker", "run", "--rm", f"--pid=container:{container}", "busybox", "sh", "-c", PROCESSES
     )  # fmt: skip
-    stat, _, status = proc.partition("\n")
-    fields = stat.rsplit(")", 1)[1].split()
-    peak = next(line.split()[1] for line in status.splitlines() if line.startswith("VmHWM:"))
-    return (int(fields[11]) + int(fields[12])) / CLOCK_TICKS, int(peak) * 1024
+    cpu, peak = 0, 0
+    for line in lines.splitlines():
+        stat, _, memory = line.partition("VmHWM:")
+        command, _, fields = stat.partition("(")[2].rpartition(")")
+        # Without VmHWM, a process ended while it was read; sh and cat are this reading.
+        if not memory or command in ("sh", "cat"):
+            continue
+        # utime, stime, cutime and cstime: CPU of the process, and of its children it reaped.
+        cpu += sum(map(int, fields.split()[11:15]))
+        peak += int(memory.split()[0]) * 1024
+    return cpu / CLOCK_TICKS, peak
 
 
 def environment() -> str:

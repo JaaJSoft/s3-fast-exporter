@@ -4,26 +4,14 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 
-import aiohttp
-from botocore.exceptions import BotoCoreError, ClientError
-
-from exporter.s3.lister import Lister, RetryPolicy, S3Error
-from exporter.s3.proxies import Proxies
+from exporter.failures import LISTING_ERRORS
+from exporter.ranges import LocalWorker, RangeQueue
 from exporter.s3.regions import Regions
-from exporter.s3.scanner import ProtocolError
-from exporter.scan import Listing, balanced_bounds, discover_bounds, scan
+from exporter.scan import Listing, balanced_bounds, discover_bounds
 from exporter.stats import ListingStats
 
 log = logging.getLogger(__name__)
 
-LISTING_ERRORS = (
-    S3Error,
-    ProtocolError,
-    aiohttp.ClientError,
-    TimeoutError,
-    BotoCoreError,
-    ClientError,
-)
 REMEMBERED_LISTINGS = 4096
 
 
@@ -37,36 +25,43 @@ class ProbeResult:
 class Prober:
     """Scans listings, each split along the page ends of its previous scan.
 
-    A listing has one scan at a time: probes arriving while it runs share its result.
+    A listing has one scan at a time: probes arriving while it runs share its result. Its ranges
+    go through the queue, to the workers that list them.
     """
 
     def __init__(
         self,
-        http: aiohttp.ClientSession,
         regions: Regions,
-        retry: RetryPolicy,
+        local: LocalWorker,
+        queue: RangeQueue,
         *,
-        concurrency: int,
-        proxies: Proxies | None = None,
         remembered: int = REMEMBERED_LISTINGS,
     ) -> None:
-        self._http = http
+        """local: lists in this process the first page of a new listing, to split it."""
         self._regions = regions
-        self._retry = retry
-        self._proxies = proxies
-        self._concurrency = concurrency
+        self._local = local
+        self._queue = queue
         self._remembered = remembered
         self._scans: dict[Listing, asyncio.Task[ProbeResult]] = {}
         self._bounds: OrderedDict[Listing, list[str]] = OrderedDict()
 
-    async def probe(self, listing: Listing) -> ProbeResult:
+    async def probe(self, listing: Listing, wait: float | None = None) -> ProbeResult:
+        """wait: seconds after which the probe fails, while its scan goes on for the others."""
+        started = time.perf_counter()
         running = self._scans.get(listing)
         if running is None:
             running = asyncio.create_task(self._scan(listing))
             self._scans[listing] = running
             running.add_done_callback(lambda _: self._scans.pop(listing, None))
-        # shield: a probe that gives up must not cancel the scan others are waiting for.
-        return await asyncio.shield(running)
+        try:
+            async with asyncio.timeout(wait) as deadline:
+                # shield: a probe that gives up must not cancel the scan others are waiting for.
+                return await asyncio.shield(running)
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+        log.warning("listing outlasted the scrape timeout", extra=_fields(listing, wait=wait))
+        return ProbeResult(listing, None, time.perf_counter() - started)
 
     async def close(self) -> None:
         running = list(self._scans.values())
@@ -77,25 +72,18 @@ class Prober:
     async def _scan(self, listing: Listing) -> ProbeResult:
         started = time.perf_counter()
         try:
-            presigner = await self._regions.presigner_for(listing.bucket)
-            lister = Lister(self._http, presigner, self._retry, self._proxies)
+            region = await self._regions.region_of(listing.bucket)
             bounds = self._bounds.get(listing)
-            if bounds is None and self._concurrency > 1 and not listing.delimiter:
-                bounds = await discover_bounds(lister, listing, self._concurrency)
-            result = await scan(lister, listing, bounds or ())
+            ranges = self._queue.capacity
+            if bounds is None and ranges > 1 and not listing.delimiter:
+                lister = await self._local.lister(listing.bucket, region)
+                bounds = await discover_bounds(lister, listing, ranges)
+            result = await self._queue.scan(listing, region, bounds or ())
         except LISTING_ERRORS as error:
             self._regions.forget(listing.bucket)
-            log.warning(
-                "listing failed",
-                extra={
-                    "bucket": listing.bucket,
-                    "prefix": listing.prefix,
-                    "delimiter": listing.delimiter,
-                    "error": str(error),
-                },
-            )
+            log.warning("listing failed", extra=_fields(listing, error=str(error)))
             return ProbeResult(listing, None, time.perf_counter() - started)
-        self._remember(listing, balanced_bounds(result, self._concurrency))
+        self._remember(listing, balanced_bounds(result, self._queue.capacity))
         return ProbeResult(listing, result.stats, time.perf_counter() - started)
 
     def _remember(self, listing: Listing, bounds: list[str]) -> None:
@@ -103,3 +91,12 @@ class Prober:
         self._bounds.move_to_end(listing)
         if len(self._bounds) > self._remembered:
             self._bounds.popitem(last=False)
+
+
+def _fields(listing: Listing, **fields: object) -> dict[str, object]:
+    return {
+        "bucket": listing.bucket,
+        "prefix": listing.prefix,
+        "delimiter": listing.delimiter,
+        **fields,
+    }

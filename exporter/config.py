@@ -24,6 +24,7 @@ class Settings:
     disable_ssl: bool
     force_path_style: bool
     list_concurrency: int
+    list_processes: int
     log_level: str
     log_format: str
     log_stream: str
@@ -65,7 +66,13 @@ def parse_settings(argv: Sequence[str], environ: Mapping[str, str]) -> Settings:
     option(
         "s3.list-concurrency",
         str(LIST_CONCURRENCY),
-        "Most ListObjectsV2 requests a probe sends at once.",
+        "Most ListObjectsV2 requests a listing process sends to a bucket at once.",
+        _positive,
+    )
+    option(
+        "s3.list-processes",
+        "1",
+        "Processes that list, each on a core of its own: past 1, worker processes list.",
         _positive,
     )
     option("log.level", "info", f"Lowest severity logged: {', '.join(LOG_LEVELS)}.")
@@ -94,6 +101,7 @@ def parse_settings(argv: Sequence[str], environ: Mapping[str, str]) -> Settings:
         disable_ssl=args.s3_disable_ssl,
         force_path_style=args.s3_force_path_style,
         list_concurrency=args.s3_list_concurrency,
+        list_processes=args.s3_list_processes,
         log_level=args.log_level,
         log_format=log_format,
         log_stream=log_stream,
