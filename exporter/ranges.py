@@ -18,14 +18,12 @@ import aiohttp
 from exporter.failures import WorkerLostError
 from exporter.s3.lister import Lister, RetryPolicy
 from exporter.s3.proxies import Proxies
-from exporter.s3.regions import Regions
+from exporter.s3.regions import REMEMBERED_BUCKETS, Regions
 from exporter.s3.throttle import Throttle
 from exporter.scan import Listing, Scan, scan, scan_range
 
 # A range whose worker stopped is listed by another one, once: a second loss points at the range.
 LOST_ATTEMPTS = 2
-# Probes name any bucket: the paces kept are those of the buckets probed last.
-REMEMBERED_BUCKETS = 4096
 
 
 @dataclass(frozen=True, slots=True)

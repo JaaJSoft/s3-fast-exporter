@@ -67,3 +67,15 @@ def test_failed_lookups_are_not_cached_and_forgotten_buckets_are_looked_up_again
     regions.forget("paris")
     presigners(regions, "paris")
     assert recorder.looked_up == ["missing", "missing", "paris", "paris"]
+
+
+def test_regions_are_kept_for_the_buckets_probed_last() -> None:
+    recorder = Recorder({"a": "eu-west-1", "b": "eu-west-2", "c": "eu-west-3"})
+    regions = Regions(recorder.new_presigner, lookup=recorder.lookup, remembered=2)
+
+    async def run() -> None:
+        for bucket in "abacba":
+            await regions.region_of(bucket)
+
+    asyncio.run(run())
+    assert recorder.looked_up == ["a", "b", "c", "b", "a"]

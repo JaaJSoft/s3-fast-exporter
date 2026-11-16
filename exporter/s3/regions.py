@@ -1,7 +1,11 @@
 import asyncio
+from collections import OrderedDict
 from collections.abc import Callable
 
 from exporter.s3.presigner import Presigner
+
+# Probes name any bucket: what is kept per bucket is kept for the buckets probed last.
+REMEMBERED_BUCKETS = 4096
 
 
 class Regions:
@@ -12,12 +16,14 @@ class Regions:
         new_presigner: Callable[[str], Presigner],
         default_region: str = "us-east-1",
         lookup: Callable[[str], str | None] | None = None,
+        remembered: int = REMEMBERED_BUCKETS,
     ) -> None:
         self._new_presigner = new_presigner
         self._default_region = default_region
         self._lookup = lookup
+        self._remembered = remembered
         self._presigners: dict[str, Presigner] = {}
-        self._bucket_regions: dict[str, asyncio.Future[str | None]] = {}
+        self._bucket_regions: OrderedDict[str, asyncio.Future[str | None]] = OrderedDict()
         self._lock = asyncio.Lock()
 
     async def presigner_for(self, bucket: str) -> Presigner:
@@ -45,6 +51,10 @@ class Regions:
             lookup = asyncio.ensure_future(asyncio.to_thread(self._lookup, bucket))
             self._bucket_regions[bucket] = lookup
             lookup.add_done_callback(lambda done: self._discard_failed(bucket, done))
+            if len(self._bucket_regions) > self._remembered:
+                self._bucket_regions.popitem(last=False)
+        else:
+            self._bucket_regions.move_to_end(bucket)
         # shield: a cancelled probe must not cancel the lookup the others are waiting for.
         return await asyncio.shield(lookup) or self._default_region
 
