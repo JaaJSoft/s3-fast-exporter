@@ -14,7 +14,7 @@ a well-designed Python service can be fast.
   Listings never go through its HTTP stack or parser: aiohttp fetches, `exporter.s3.scanner` reads.
 - Runtime dependencies: aiohttp, botocore, prometheus-client, optional uvloop. Adding one needs an
   explicit agreement first.
-- The code runs on CPython >= 3.12 and on PyPy 3.12.
+- The code runs on CPython >= 3.12.
 
 ## Commands
 
@@ -24,7 +24,6 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy
 uv run pytest
-uv run --no-default-groups --group test --python pypy3.12 pytest
 uv run python -m scripts.record_golden   # needs Docker: re-records tests/golden/upstream
 uv run python -m scripts.bench_scanner   # scanner against botocore's parser, per page
 uv run python -m fakes3 &                # the golden datasets on http://127.0.0.1:9000
@@ -37,9 +36,6 @@ uv run python -m scripts.bench_listing   # both exporters, 10k to 10M objects: d
 
 The image must stay a drop-in replacement: same flags and variables as the `upstream` service of
 `compose.yaml`, and `tests/test_parity.py` green against it (CI job `image`).
-
-mypy and the `oracle` group (moto) need CPython with prebuilt wheels: only the `test` group is
-meant for PyPy.
 
 ## Code
 

@@ -53,7 +53,6 @@ botocore's parser, which reads the whole XML document into dictionaries:
 | Runtime | Scanner | botocore |
 |---|---|---|
 | CPython 3.14 | 0.73 ms | 50.3 ms |
-| PyPy 3.12 | 0.39 ms | 18.8 ms |
 
 ## Where the time goes
 

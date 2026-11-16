@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-uvloop = ["uvloop>=0.23; sys_platform != 'win32' and platform_python_implementation == 'CPython'"]
+uvloop = ["uvloop>=0.23; sys_platform != 'win32'"]
 
 [project.scripts]
 s3-fast-exporter = "exporter.__main__:main"
