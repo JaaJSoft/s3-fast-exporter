@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -31,6 +31,14 @@ prefixes = st.sampled_from(["", "a", "a/", "é"])
 delimiters = st.sampled_from(["", "/", "0/", "a"])
 
 
+@pytest.fixture(scope="module")
+def loop() -> Iterator[asyncio.Runner]:
+    # One event loop for all examples: on Windows, each new one opens a TCP connection to itself,
+    # and thousands of them in a row exhaust the ephemeral ports.
+    with asyncio.Runner() as runner:
+        yield runner
+
+
 def bucket_of(objects: list[tuple[str, int, int]]) -> Bucket:
     return Bucket(
         "bucket",
@@ -54,6 +62,7 @@ def groups_of(bucket: Bucket, listing: Listing) -> set[str]:
 # still list it.
 @example([("/", 0, 0), ("0", 0, 0)], "", "/", ["0"], 1)
 def test_any_bounds_give_the_result_of_a_single_listing(
+    loop: asyncio.Runner,
     objects: list[tuple[str, int, int]],
     prefix: str,
     delimiter: str,
@@ -62,8 +71,8 @@ def test_any_bounds_give_the_result_of_a_single_listing(
 ) -> None:
     source = StoreSource(bucket_of(objects), max_keys=max_keys)
     listing = Listing("bucket", prefix, delimiter)
-    single = asyncio.run(scan(source, listing))
-    split = asyncio.run(scan(source, listing, bounds))
+    single = loop.run(scan(source, listing))
+    split = loop.run(scan(source, listing, bounds))
     assert split.stats == single.stats
     assert split.entries == single.entries
 
@@ -71,7 +80,12 @@ def test_any_bounds_give_the_result_of_a_single_listing(
 @settings(max_examples=300, deadline=None)
 @given(objects, prefixes, delimiters, st.integers(1, 2), st.integers(2, 6))
 def test_learned_bounds_never_fall_inside_a_group(
-    objects: list[tuple[str, int, int]], prefix: str, delimiter: str, max_keys: int, ranges: int
+    loop: asyncio.Runner,
+    objects: list[tuple[str, int, int]],
+    prefix: str,
+    delimiter: str,
+    max_keys: int,
+    ranges: int,
 ) -> None:
     # S3 does not document whether StartAfter inside a group, or equal to its prefix, lists the
     # group again. Bounds outside of every group make the question moot.
@@ -81,28 +95,28 @@ def test_learned_bounds_never_fall_inside_a_group(
     groups = groups_of(bucket, listing)
     bounds: list[str] = []
     for _ in range(3):
-        result = asyncio.run(scan(source, listing, bounds))
+        result = loop.run(scan(source, listing, bounds))
         bounds = balanced_bounds(result, ranges)
         assert [bound for bound in bounds if any(map(bound.startswith, groups))] == []
 
 
-def test_learned_ranges_are_even_and_cost_no_extra_request() -> None:
+def test_learned_ranges_are_even_and_cost_no_extra_request(loop: asyncio.Runner) -> None:
     source = StoreSource(named(*(f"k{number:04d}" for number in range(100))), max_keys=2)
-    single = asyncio.run(scan(source, LISTING))
+    single = loop.run(scan(source, LISTING))
     assert (source.requests, single.pages) == (50, 50)
 
     bounds = balanced_bounds(single, 4)
     assert bounds == ["k0023", "k0049", "k0073"]
     source.requests = 0
-    split = asyncio.run(scan(source, LISTING, bounds))
+    split = loop.run(scan(source, LISTING, bounds))
     assert source.requests == 50
     assert split.stats == single.stats
     assert balanced_bounds(split, 4) == bounds
 
 
-def test_listings_of_few_pages_are_not_split() -> None:
+def test_listings_of_few_pages_are_not_split(loop: asyncio.Runner) -> None:
     source = StoreSource(named(*"abcdefgh"), max_keys=1)
-    result = asyncio.run(scan(source, LISTING))
+    result = loop.run(scan(source, LISTING))
     assert result.pages == 2 * MIN_PAGES_PER_RANGE
     assert balanced_bounds(result, 8) == ["d"]
     result.pages -= 1
@@ -130,10 +144,10 @@ def test_listings_of_few_pages_are_not_split() -> None:
     ],
 )
 def test_first_scans_split_on_the_top_groups(
-    keys: list[str], max_keys: int, expected: list[str]
+    loop: asyncio.Runner, keys: list[str], max_keys: int, expected: list[str]
 ) -> None:
     source = StoreSource(named(*keys), max_keys=max_keys)
-    assert asyncio.run(discover_bounds(source, LISTING, 4)) == expected
+    assert loop.run(discover_bounds(source, LISTING, 4)) == expected
 
 
 class IgnoringStartAfter(StoreSource):
@@ -143,7 +157,7 @@ class IgnoringStartAfter(StoreSource):
         return super().pages(bucket, prefix=prefix, delimiter=delimiter)
 
 
-def test_a_server_ignoring_start_after_fails_the_scan() -> None:
+def test_a_server_ignoring_start_after_fails_the_scan(loop: asyncio.Runner) -> None:
     source = IgnoringStartAfter(named("a", "b", "c"))
     with pytest.raises(ProtocolError, match="StartAfter"):
-        asyncio.run(scan(source, LISTING, ["b"]))
+        loop.run(scan(source, LISTING, ["b"]))
