@@ -12,6 +12,7 @@ DEFAULTS = Settings(
     disable_ssl=False,
     force_path_style=False,
     list_concurrency=64,
+    list_processes=1,
     log_level="info",
     log_format="logfmt",
     log_stream="stderr",
@@ -52,6 +53,7 @@ def test_environment_variables_are_named_like_upstream_and_flags_win() -> None:
         "S3_EXPORTER_S3_DISABLE_SSL": "true",
         "S3_EXPORTER_S3_FORCE_PATH_STYLE": "1",
         "S3_EXPORTER_S3_LIST_CONCURRENCY": "8",
+        "S3_EXPORTER_S3_LIST_PROCESSES": "4",
         "S3_EXPORTER_LOG_FORMAT": "json",
     }
     settings = parse_settings(["--no-s3.disable-ssl"], environ)
@@ -60,6 +62,7 @@ def test_environment_variables_are_named_like_upstream_and_flags_win() -> None:
     assert not settings.disable_ssl
     assert settings.force_path_style
     assert settings.list_concurrency == 8
+    assert settings.list_processes == 4
     assert settings.log_format == "json"
 
 
@@ -92,6 +95,7 @@ def test_ipv6_listen_address() -> None:
         (["--s3.list-concurrency=0"], {}),
         (["--s3.list-concurrency=-4"], {}),
         ([], {"S3_EXPORTER_S3_LIST_CONCURRENCY": "many"}),
+        (["--s3.list-processes=0"], {}),
     ],
 )
 def test_invalid_settings_exit_with_usage(argv: list[str], environ: dict[str, str]) -> None:

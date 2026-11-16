@@ -1,4 +1,5 @@
 import asyncio
+import itertools
 from collections.abc import AsyncGenerator, Iterator
 from datetime import UTC, datetime, timedelta
 
@@ -15,6 +16,7 @@ from exporter.scan import (
     balanced_bounds,
     discover_bounds,
     scan,
+    spans,
 )
 from fakes3.store import Bucket, StoredObject, common_prefix
 
@@ -75,6 +77,43 @@ def test_any_bounds_give_the_result_of_a_single_listing(
     split = loop.run(scan(source, listing, bounds))
     assert split.stats == single.stats
     assert split.entries == single.entries
+
+
+@settings(max_examples=300, deadline=None)
+@given(
+    objects, prefixes, delimiters, st.lists(names, max_size=6), st.integers(1, 3), st.integers(1, 4)
+)
+def test_spans_listed_apart_merge_into_the_scan_of_their_bounds(
+    loop: asyncio.Runner,
+    objects: list[tuple[str, int, int]],
+    prefix: str,
+    delimiter: str,
+    bounds: list[str],
+    max_keys: int,
+    count: int,
+) -> None:
+    source = StoreSource(bucket_of(objects), max_keys=max_keys)
+    listing = Listing("bucket", prefix, delimiter)
+    whole = loop.run(scan(source, listing, bounds))
+    merged = Scan()
+    for span in spans(bounds, count):
+        merged.extend(
+            loop.run(scan(source, listing, span.bounds, after=span.after, until=span.until))
+        )
+    assert merged == whole
+
+
+@given(st.lists(names, max_size=12), st.integers(1, 6))
+def test_spans_share_the_ranges_out_evenly(bounds: list[str], count: int) -> None:
+    ordered = sorted(set(bounds))
+    parts = spans(bounds, count)
+    assert len(parts) == min(count, len(ordered) + 1)
+    assert (parts[0].after, parts[-1].until) == ("", None)
+    assert all(left.until == right.after for left, right in itertools.pairwise(parts))
+    edges = [bound for part in parts for bound in (*part.bounds, part.until) if bound is not None]
+    assert edges == ordered
+    sizes = [len(part.bounds) + 1 for part in parts]
+    assert max(sizes) - min(sizes) <= 1
 
 
 @settings(max_examples=300, deadline=None)

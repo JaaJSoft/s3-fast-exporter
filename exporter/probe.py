@@ -5,26 +5,18 @@ from collections import OrderedDict
 from dataclasses import dataclass
 
 import aiohttp
-from botocore.exceptions import BotoCoreError, ClientError
 
-from exporter.s3.lister import Lister, RetryPolicy, S3Error
+from exporter.failures import LISTING_ERRORS
+from exporter.s3.lister import Lister, RetryPolicy
 from exporter.s3.proxies import Proxies
 from exporter.s3.regions import Regions
-from exporter.s3.scanner import ProtocolError
 from exporter.s3.throttle import Throttle
 from exporter.scan import Listing, balanced_bounds, discover_bounds, scan
 from exporter.stats import ListingStats
+from exporter.workers import Workers
 
 log = logging.getLogger(__name__)
 
-LISTING_ERRORS = (
-    S3Error,
-    ProtocolError,
-    aiohttp.ClientError,
-    TimeoutError,
-    BotoCoreError,
-    ClientError,
-)
 REMEMBERED_LISTINGS = 4096
 
 
@@ -38,7 +30,8 @@ class ProbeResult:
 class Prober:
     """Scans listings, each split along the page ends of its previous scan.
 
-    A listing has one scan at a time: probes arriving while it runs share its result.
+    A listing has one scan at a time: probes arriving while it runs share its result. With
+    workers, the scan spreads its ranges over them.
     """
 
     def __init__(
@@ -50,6 +43,7 @@ class Prober:
         concurrency: int,
         proxies: Proxies | None = None,
         remembered: int = REMEMBERED_LISTINGS,
+        workers: Workers | None = None,
     ) -> None:
         self._http = http
         self._regions = regions
@@ -57,6 +51,7 @@ class Prober:
         self._proxies = proxies
         self._concurrency = concurrency
         self._remembered = remembered
+        self._workers = workers
         self._scans: dict[Listing, asyncio.Task[ProbeResult]] = {}
         self._bounds: OrderedDict[Listing, list[str]] = OrderedDict()
 
@@ -87,13 +82,17 @@ class Prober:
     async def _scan(self, listing: Listing) -> ProbeResult:
         started = time.perf_counter()
         try:
-            presigner = await self._regions.presigner_for(listing.bucket)
+            region = await self._regions.region_of(listing.bucket)
+            presigner = await self._regions.presigner(region)
             throttle = Throttle(self._concurrency)
             lister = Lister(self._http, presigner, self._retry, self._proxies, throttle)
             bounds = self._bounds.get(listing)
             if bounds is None and self._concurrency > 1 and not listing.delimiter:
                 bounds = await discover_bounds(lister, listing, self._concurrency)
-            result = await scan(lister, listing, bounds or ())
+            if self._workers is None:
+                result = await scan(lister, listing, bounds or ())
+            else:
+                result = await self._workers.scan(listing, region, bounds or ())
         except LISTING_ERRORS as error:
             self._regions.forget(listing.bucket)
             log.warning("listing failed", extra=_fields(listing, error=str(error)))

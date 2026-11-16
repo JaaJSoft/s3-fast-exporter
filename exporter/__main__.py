@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import os
 import sys
@@ -9,6 +8,7 @@ from exporter import __version__
 from exporter.app import create_app
 from exporter.config import parse_settings
 from exporter.logs import configure_logging
+from exporter.loop import new_event_loop
 
 log = logging.getLogger("exporter")
 
@@ -27,19 +27,10 @@ def main() -> None:
         create_app(settings),
         host=settings.listen_host,
         port=settings.listen_port,
-        loop=_event_loop(),
+        loop=new_event_loop(),
         print=None,
         access_log=None,
     )
-
-
-def _event_loop() -> asyncio.AbstractEventLoop | None:
-    try:
-        import uvloop
-    except ImportError:
-        return None
-    loop: asyncio.AbstractEventLoop = uvloop.new_event_loop()
-    return loop
 
 
 if __name__ == "__main__":

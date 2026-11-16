@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 import aiohttp
 import pytest
 from botocore.session import Session
+from listings import virtual_stats
 from servers import serve_app
 
 from exporter.probe import REMEMBERED_LISTINGS, Prober, ProbeResult
@@ -13,11 +14,10 @@ from exporter.s3.lister import RetryPolicy
 from exporter.s3.presigner import Endpoint, Presigner
 from exporter.s3.regions import Regions
 from exporter.scan import Listing
-from exporter.stats import ListingStats
 from fakes3.app import InFlight, RequestCounter, SlowDown, create_app
 from fakes3.golden import golden_buckets
 from fakes3.store import Listable
-from fakes3.virtual import DATE, VirtualBucket, second_of, size_of
+from fakes3.virtual import VirtualBucket
 
 OBJECTS = 40_000
 BENCH = Listing("bench", "data/")
@@ -67,19 +67,6 @@ def probes(
     return asyncio.run(run())
 
 
-def expected_stats() -> ListingStats:
-    newest = max(range(OBJECTS), key=second_of)
-    second = second_of(newest)
-    return ListingStats(
-        objects=OBJECTS,
-        total_size=sum(map(size_of, range(OBJECTS))),
-        biggest_size=max(map(size_of, range(OBJECTS))),
-        newest_date=f"{DATE}T{second // 3600:02d}:{second // 60 % 60:02d}:{second % 60:02d}"
-        f".000Z".encode(),
-        newest_size=size_of(newest),
-    )
-
-
 def test_each_scan_splits_along_the_page_ends_of_the_previous_one(
     aws_session: Session, fakes3: tuple[str, RequestCounter]
 ) -> None:
@@ -87,7 +74,7 @@ def test_each_scan_splits_along_the_page_ends_of_the_previous_one(
     # One request finds the four groups of data/, then each of the first three ranges reads
     # one page into the next group. Later scans cut 8 ranges at page ends: no request is lost.
     assert [requests for _, requests in (first, second, third)] == [44, 40, 40]
-    assert first[0].stats == second[0].stats == third[0].stats == expected_stats()
+    assert first[0].stats == second[0].stats == third[0].stats == virtual_stats(OBJECTS)
 
 
 def test_probes_arriving_during_a_scan_share_it(
@@ -166,7 +153,7 @@ def test_scans_slow_down_when_s3_answers_503(aws_session: Session) -> None:
     )
     with serve_app(throttled) as url:
         done = probes(aws_session, (url, requests), BENCH, BENCH, BENCH)
-    assert all(result.stats == expected_stats() for result, _ in done)
+    assert all(result.stats == virtual_stats(OBJECTS) for result, _ in done)
     assert 0 < slow_downs.total <= 36
 
 

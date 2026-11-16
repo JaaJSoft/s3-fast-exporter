@@ -2,13 +2,11 @@ import asyncio
 import json
 import logging
 import math
-import ssl
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from html import escape
 from urllib.request import getproxies_environment
 
-import aiohttp
 from aiohttp import web
 from botocore.session import Session, get_session
 from prometheus_client import CollectorRegistry, generate_latest
@@ -16,21 +14,22 @@ from prometheus_client import CollectorRegistry, generate_latest
 from exporter import __version__
 from exporter.config import Settings
 from exporter.exposition import CONTENT_TYPE, exporter_registry, probe_exposition
-from exporter.probe import LISTING_ERRORS, Prober
+from exporter.failures import LISTING_ERRORS
+from exporter.probe import Prober
 from exporter.s3.account import Account
+from exporter.s3.client import http_client
 from exporter.s3.lister import RetryPolicy
 from exporter.s3.presigner import Endpoint, Presigner
 from exporter.s3.proxies import Proxies
 from exporter.s3.regions import Regions
 from exporter.scan import Listing
+from exporter.workers import Workers
 
 log = logging.getLogger(__name__)
 
-MIN_CONNECTIONS = 64
 SCRAPE_TIMEOUT_HEADER = "X-Prometheus-Scrape-Timeout-Seconds"
 # Prometheus drops answers that arrive after its scrape timeout: probes answer this much sooner.
 SCRAPE_TIMEOUT_MARGIN = 0.5
-TIMEOUT = aiohttp.ClientTimeout(total=None, connect=10, sock_read=60)
 NOSNIFF = {"X-Content-Type-Options": "nosniff"}
 
 
@@ -76,21 +75,26 @@ def s3_context(session: Session) -> Callable[[web.Application], AsyncIterator[No
             # A custom endpoint is a single S3 service: its buckets share the configured region.
             lookup=account.bucket_region if endpoint.url is None else None,
         )
-        tls = ssl.create_default_context(cafile=session.get_config_variable("ca_bundle"))
-        # Room for two probes at full speed; more probes share the connections.
-        connections = max(MIN_CONNECTIONS, 2 * settings.list_concurrency)
-        connector = aiohttp.TCPConnector(limit=connections, ttl_dns_cache=300, ssl=tls)
-        async with aiohttp.ClientSession(connector=connector, timeout=TIMEOUT) as http:
-            prober = Prober(
-                http,
-                regions,
-                RetryPolicy(),
-                concurrency=settings.list_concurrency,
-                proxies=Proxies(getproxies_environment()),
-            )
-            app[S3_ACCESS] = S3(account, prober)
-            yield
-            await prober.close()
+        workers = None
+        if settings.list_processes > 1:
+            workers = Workers(settings.list_processes, settings, endpoint)
+            workers.start()
+        try:
+            async with http_client(session, settings.list_concurrency) as http:
+                prober = Prober(
+                    http,
+                    regions,
+                    RetryPolicy(),
+                    concurrency=settings.list_concurrency * settings.list_processes,
+                    proxies=Proxies(getproxies_environment()),
+                    workers=workers,
+                )
+                app[S3_ACCESS] = S3(account, prober)
+                yield
+                await prober.close()
+        finally:
+            if workers is not None:
+                await workers.close()
 
     return context
 
