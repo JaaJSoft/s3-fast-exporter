@@ -5,12 +5,16 @@ locating elements by their tags is exact, and much cheaper than a generic XML pa
 """
 
 import html
+import re
 from bisect import bisect_right
 from dataclasses import dataclass, field
 from urllib.parse import unquote_plus
 from xml.sax.saxutils import unescape
 
 LAST_MODIFIED_WIDTH = len(b"2009-10-12T17:50:30.000Z")
+# Each appears once in each <Contents>, and nowhere else in a listing.
+SIZE = re.compile(rb"<Size>([0-9]+)</Size>")
+LAST_MODIFIED = re.compile(rb"<LastModified>([^<]*)</LastModified>")
 MAX_CODE_POINT = 0x10FFFF
 FIRST_SURROGATE, AFTER_SURROGATES = 0xD800, 0xE000
 
@@ -127,21 +131,12 @@ def scan_error(body: bytes) -> tuple[str, str]:
 
 
 def _scan_contents(body: bytes) -> tuple[list[int], list[bytes]]:
-    find = body.find
-    sizes: list[int] = []
-    last_modified: list[bytes] = []
-    start = find(b"<Contents>")
-    while start >= 0:
-        end = find(b"</Contents>", start)
-        if end < 0:
-            raise ValueError
-        size = find(b"<Size>", start, end) + 6
-        date = find(b"<LastModified>", start, end) + 14
-        if size < 6 or date < 14:
-            raise ValueError
-        sizes.append(int(body[size : find(b"<", size)]))
-        last_modified.append(body[date : find(b"<", date)])
-        start = find(b"<Contents>", end)
+    """The size and the date of each object, in the order of the listing."""
+    sizes = list(map(int, SIZE.findall(body)))
+    last_modified = LAST_MODIFIED.findall(body)
+    objects = body.count(b"<Contents>")
+    if not len(sizes) == len(last_modified) == objects == body.count(b"</Contents>"):
+        raise ValueError
     return sizes, last_modified
 
 
