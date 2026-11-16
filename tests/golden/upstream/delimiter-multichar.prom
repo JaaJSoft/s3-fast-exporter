@@ -1,0 +1,9 @@
+# HELP s3_common_prefixes A count of all the keys between the prefix and the next occurrence of the string specified by the delimiter
+# TYPE s3_common_prefixes gauge
+s3_common_prefixes{bucket="golden",delimiter="/11/",prefix="logs/"} 1
+# HELP s3_list_duration_seconds The total duration of the list operation
+# TYPE s3_list_duration_seconds gauge
+s3_list_duration_seconds{bucket="golden",delimiter="/11/",prefix="logs/"} 0
+# HELP s3_list_success If the ListObjects operation was a success
+# TYPE s3_list_success gauge
+s3_list_success{bucket="golden",delimiter="/11/",prefix="logs/"} 1

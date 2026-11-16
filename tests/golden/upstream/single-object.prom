@@ -1,0 +1,21 @@
+# HELP s3_biggest_object_size_bytes The size of the biggest object
+# TYPE s3_biggest_object_size_bytes gauge
+s3_biggest_object_size_bytes{bucket="single",prefix=""} 1234
+# HELP s3_last_modified_object_date The last modified date of the object that was modified most recently
+# TYPE s3_last_modified_object_date gauge
+s3_last_modified_object_date{bucket="single",prefix=""} 1.5604596e+09
+# HELP s3_last_modified_object_size_bytes The size of the object that was modified most recently
+# TYPE s3_last_modified_object_size_bytes gauge
+s3_last_modified_object_size_bytes{bucket="single",prefix=""} 1234
+# HELP s3_list_duration_seconds The total duration of the list operation
+# TYPE s3_list_duration_seconds gauge
+s3_list_duration_seconds{bucket="single",delimiter="",prefix=""} 0
+# HELP s3_list_success If the ListObjects operation was a success
+# TYPE s3_list_success gauge
+s3_list_success{bucket="single",delimiter="",prefix=""} 1
+# HELP s3_objects The total number of objects for the bucket/prefix combination
+# TYPE s3_objects gauge
+s3_objects{bucket="single",prefix=""} 1
+# HELP s3_objects_size_sum_bytes The total size of all objects summed
+# TYPE s3_objects_size_sum_bytes gauge
+s3_objects_size_sum_bytes{bucket="single",prefix=""} 1234

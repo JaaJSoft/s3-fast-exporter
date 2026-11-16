@@ -1,0 +1,32 @@
+name: s3-fast-exporter
+
+services:
+  fakes3:
+    build:
+      context: .
+      dockerfile: fakes3/Dockerfile
+    ports:
+      - "127.0.0.1:9000:9000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/')"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  upstream:
+    # ribbybibby/s3_exporter 0.5.0, revision d5fe50c, the last commit of the project.
+    image: ribbybibby/s3-exporter@sha256:c12212b7dd2aa68da2647d4a6b7afd38edffd32e6f3f5b48489025da38e98bbb
+    platform: linux/amd64
+    command:
+      - --s3.endpoint-url=http://fakes3:9000
+      - --s3.force-path-style
+      - --s3.disable-ssl
+    environment:
+      AWS_ACCESS_KEY_ID: fakes3
+      AWS_SECRET_ACCESS_KEY: fakes3
+      AWS_REGION: us-east-1
+    ports:
+      - "127.0.0.1:9340:9340"
+    depends_on:
+      fakes3:
+        condition: service_healthy

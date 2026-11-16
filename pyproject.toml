@@ -21,6 +21,10 @@ Source = "https://github.com/JaaJSoft/s3-fast-exporter"
 test = [
     "pytest>=8.4",
 ]
+oracle = [
+    "botocore>=1.44",
+    "moto[server]>=5.2",
+]
 lint = [
     "mypy>=1.18",
     "ruff>=0.14",
@@ -28,6 +32,7 @@ lint = [
 ]
 dev = [
     { include-group = "lint" },
+    { include-group = "oracle" },
 ]
 
 [build-system]
@@ -48,12 +53,17 @@ select = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]
+"tests/**" = ["S101", "S310"]
+"scripts/**" = ["S310", "S603", "S607"]
 
 [tool.mypy]
 strict = true
 python_version = "3.12"
-files = ["exporter", "tests"]
+files = ["exporter", "fakes3", "scripts", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["botocore.*", "moto.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

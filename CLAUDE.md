@@ -23,9 +23,11 @@ uv run ruff format --check .
 uv run mypy
 uv run pytest
 uv run --no-default-groups --group test --python pypy3.12 pytest
+uv run python -m scripts.record_golden   # needs Docker: re-records tests/golden/upstream
 ```
 
-mypy does not install on PyPy: the `test` group is the only one meant for PyPy.
+mypy and the `oracle` group (moto, botocore) need CPython with prebuilt wheels: only the `test`
+group is meant for PyPy.
 
 ## Code
 
@@ -49,6 +51,8 @@ mypy does not install on PyPy: the `test` group is the only one meant for PyPy.
 - A partitioned listing must give the same result as a sequential one for any partition
   boundaries (hypothesis).
 - Integration tests use moto in server mode.
+- `tests/golden/upstream` holds the upstream exporter's answers on the deterministic `fakes3`
+  datasets (`fakes3/golden.py`). Changing those datasets means re-recording; CI checks it.
 
 ## Writing
 
