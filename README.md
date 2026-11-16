@@ -171,4 +171,5 @@ compared side by side.
 
 ## License
 
-Apache License 2.0. See [NOTICE](NOTICE) for what comes from ribbybibby/s3_exporter.
+Copyright 2026 JaaJSoft, under the Apache License 2.0. See [NOTICE](NOTICE) for what comes from
+ribbybibby/s3_exporter.

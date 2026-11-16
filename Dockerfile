@@ -16,6 +16,7 @@ FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87
 LABEL org.opencontainers.image.title="s3-fast-exporter" \
       org.opencontainers.image.description="Prometheus exporter for S3 buckets and objects" \
       org.opencontainers.image.source="https://github.com/JaaJSoft/s3-fast-exporter" \
+      org.opencontainers.image.vendor="JaaJSoft" \
       org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=build /opt/venv /opt/venv
 COPY LICENSE NOTICE /usr/share/doc/s3-fast-exporter/
