@@ -30,3 +30,27 @@ services:
     depends_on:
       fakes3:
         condition: service_healthy
+
+  exporter:
+    # Same flags and variables as the upstream service: the image is a drop-in replacement.
+    build:
+      context: .
+    image: s3-fast-exporter:dev
+    command:
+      - --s3.endpoint-url=http://fakes3:9000
+      - --s3.force-path-style
+      - --s3.disable-ssl
+    environment:
+      AWS_ACCESS_KEY_ID: fakes3
+      AWS_SECRET_ACCESS_KEY: fakes3
+      AWS_REGION: us-east-1
+    ports:
+      - "127.0.0.1:9341:9340"
+    healthcheck:
+      test: ["CMD", "/opt/venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9340/-/healthy')"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    depends_on:
+      fakes3:
+        condition: service_healthy

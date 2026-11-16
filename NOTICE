@@ -1,0 +1,7 @@
+s3-fast-exporter
+Copyright 2026 The s3-fast-exporter Authors
+
+This product reproduces the metric names, HELP texts, command line flags,
+environment variables, configuration examples and test scenarios of
+ribbybibby/s3_exporter (https://github.com/ribbybibby/s3_exporter), licensed
+under the Apache License, Version 2.0.

@@ -1,6 +1,7 @@
 """The exporter, served over HTTP, answers the golden probes as upstream did."""
 
 import json
+import os
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
@@ -32,6 +33,10 @@ s3_list_success{{bucket="{bucket}",delimiter="",prefix=""}} 0
 
 @pytest.fixture(scope="module")
 def exporter(aws_session: Session) -> Iterator[str]:
+    """In-process by default; PARITY_EXPORTER_URL points the same tests at a running image."""
+    if url := os.environ.get("PARITY_EXPORTER_URL"):
+        yield url
+        return
     with serve_app(create_fakes3(golden_buckets())) as fakes3:
         settings = parse_settings(["--s3.endpoint-url", fakes3, "--s3.force-path-style"], {})
         with serve_app(create_app(settings, aws_session)) as url:
