@@ -65,6 +65,12 @@ meant for PyPy.
 - `tests/golden/upstream` holds the upstream exporter's answers on the deterministic `fakes3`
   datasets (`fakes3/golden.py`). Changing those datasets means re-recording; CI checks it.
 
+## Releasing
+
+Every merge on master publishes `ghcr.io/jaajsoft/s3-fast-exporter:edge` for amd64 and arm64.
+For a release, set `version` in `pyproject.toml`, merge, then push the tag `vX.Y.Z` on that
+commit: CI refuses a tag that differs from the version and publishes `X.Y.Z`, `X.Y` and `latest`.
+
 ## Writing
 
 - Never use an em dash or an en dash, in code, docs or commits. Use "-", ":" or parentheses.
