@@ -10,13 +10,13 @@ sequentially. Parallel listing for large buckets is in progress.
 
 ## Quick start
 
-No image is published yet. Build it from this repository:
+Images for amd64 and arm64 are published on the GitHub Container Registry. `edge` follows the
+master branch, and each release is tagged `X.Y.Z`, `X.Y` and `latest`.
 
 ```sh
-docker build -t s3-fast-exporter .
 docker run --rm -p 9340:9340 \
   -e AWS_REGION=eu-west-1 -e AWS_ACCESS_KEY_ID=... -e AWS_SECRET_ACCESS_KEY=... \
-  s3-fast-exporter
+  ghcr.io/jaajsoft/s3-fast-exporter:edge
 curl 'http://localhost:9340/probe?bucket=my-bucket&prefix=backups/'
 ```
 
@@ -26,8 +26,10 @@ To use the AWS configuration of the host, mount it read-only:
 docker run --rm -p 9340:9340 -v "$HOME/.aws:/aws:ro" \
   -e AWS_CONFIG_FILE=/aws/config -e AWS_SHARED_CREDENTIALS_FILE=/aws/credentials \
   -e AWS_PROFILE=my-profile \
-  s3-fast-exporter
+  ghcr.io/jaajsoft/s3-fast-exporter:edge
 ```
+
+The image can also be built from this repository with `docker build -t s3-fast-exporter .`.
 
 ## Endpoints
 
