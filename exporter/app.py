@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import math
 import ssl
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -26,6 +27,9 @@ from exporter.scan import Listing
 log = logging.getLogger(__name__)
 
 MIN_CONNECTIONS = 64
+SCRAPE_TIMEOUT_HEADER = "X-Prometheus-Scrape-Timeout-Seconds"
+# Prometheus drops answers that arrive after its scrape timeout: probes answer this much sooner.
+SCRAPE_TIMEOUT_MARGIN = 0.5
 TIMEOUT = aiohttp.ClientTimeout(total=None, connect=10, sock_read=60)
 NOSNIFF = {"X-Content-Type-Options": "nosniff"}
 
@@ -103,8 +107,20 @@ async def probe(request: web.Request) -> web.Response:
     if not bucket:
         return web.Response(status=400, text="bucket parameter is missing\n", headers=NOSNIFF)
     listing = Listing(bucket, request.query.get("prefix", ""), request.query.get("delimiter", ""))
-    result = await request.app[S3_ACCESS].prober.probe(listing)
+    timeout = scrape_timeout(request.headers.get(SCRAPE_TIMEOUT_HEADER))
+    result = await request.app[S3_ACCESS].prober.probe(listing, timeout)
     return web.Response(body=probe_exposition(result), headers={"Content-Type": CONTENT_TYPE})
+
+
+def scrape_timeout(header: str | None) -> float | None:
+    """Seconds a probe may take, from the scrape timeout Prometheus sends; None without one."""
+    try:
+        seconds = float(header or "nan")
+    except ValueError:
+        return None
+    if not math.isfinite(seconds) or seconds <= 0:
+        return None
+    return max(seconds - SCRAPE_TIMEOUT_MARGIN, seconds / 2)
 
 
 async def discovery(request: web.Request) -> web.Response:

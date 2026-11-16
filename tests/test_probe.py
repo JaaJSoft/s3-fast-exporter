@@ -1,4 +1,5 @@
 import asyncio
+import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 
@@ -127,6 +128,30 @@ def test_a_failed_listing_has_no_stats(
     [(result, _)] = probes(aws_session, fakes3, Listing("missing"))
     assert result.listing == Listing("missing")
     assert result.stats is None
+
+
+def test_a_probe_fails_at_its_timeout_while_the_scan_goes_on(aws_session: Session) -> None:
+    requests = RequestCounter()
+    slow_s3 = create_app(
+        {"bench": VirtualBucket("bench", 3000)}, latency=0.2, list_requests=requests
+    )
+
+    async def run() -> tuple[ProbeResult, float, ProbeResult]:
+        async with prober(aws_session, url) as probing:
+            started = time.perf_counter()
+            gave_up = await probing.probe(BENCH, wait=0.1)
+            waited = time.perf_counter() - started
+            return gave_up, waited, await probing.probe(BENCH)
+
+    with serve_app(slow_s3) as url:
+        gave_up, waited, finished = asyncio.run(run())
+    assert gave_up.stats is None
+    assert waited < 0.2
+    # The second probe waited for the scan the first one started: two requests to discover
+    # data/, then three pages.
+    assert finished.stats is not None
+    assert finished.stats.objects == 3000
+    assert requests.total == 5
 
 
 def test_closing_cancels_the_scans_in_flight(aws_session: Session) -> None:
