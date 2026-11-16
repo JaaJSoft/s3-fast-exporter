@@ -8,7 +8,11 @@ from exporter.s3.scanner import ProtocolError
 
 
 class WorkerError(Exception):
-    """A worker process could not list its ranges, or stopped while listing them."""
+    """A worker process could not list a range, or stopped while listing it."""
+
+
+class WorkerLostError(WorkerError):
+    """The worker process stopped while listing a range: another one may list it."""
 
 
 LISTING_ERRORS = (

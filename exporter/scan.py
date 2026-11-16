@@ -7,12 +7,11 @@ exactly what a single listing gives.
 """
 
 import asyncio
-import itertools
 from bisect import bisect_left
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from exporter.s3.scanner import ListPage, ProtocolError, decode, group_end
 from exporter.stats import ListingStats
@@ -58,31 +57,19 @@ class Scan:
         self.pages += later.pages
 
 
-@dataclass(frozen=True, slots=True)
-class Span:
-    """Consecutive ranges of a listing, from after to until, split at the bounds between."""
-
-    after: str = ""
-    until: str | None = None
-    bounds: tuple[str, ...] = ()
+# Lists the range (after, until] of a listing; until None is the end of the listing.
+type RangeLister = Callable[[str, str | None], Coroutine[Any, Any, Scan]]
 
 
-async def scan(
-    source: PageSource,
-    listing: Listing,
-    bounds: Sequence[str] = (),
-    *,
-    after: str = "",
-    until: str | None = None,
-) -> Scan:
-    """Lists the ranges from after to until, split at the bounds, concurrently, and merges them."""
+async def scan(list_range: RangeLister, bounds: Sequence[str] = ()) -> Scan:
+    """Lists the ranges between the bounds concurrently, and merges them in key order."""
     # Overlapping ranges would count entries twice: the bounds must be sorted and distinct.
     ordered = sorted(set(bounds))
     try:
         async with asyncio.TaskGroup() as group:
             ranges = [
-                group.create_task(_scan_range(source, listing, start, end))
-                for start, end in zip([after, *ordered], [*ordered, until], strict=True)
+                group.create_task(list_range(after, until))
+                for after, until in zip(["", *ordered], [*ordered, None], strict=True)
             ]
     except ExceptionGroup as failures:
         raise failures.exceptions[0] from None
@@ -92,7 +79,7 @@ async def scan(
     return total
 
 
-async def _scan_range(source: PageSource, listing: Listing, after: str, until: str | None) -> Scan:
+async def scan_range(source: PageSource, listing: Listing, after: str, until: str | None) -> Scan:
     part = Scan()
     pages = source.pages(
         listing.bucket, prefix=listing.prefix, delimiter=listing.delimiter, start_after=after
@@ -113,22 +100,6 @@ async def _scan_range(source: PageSource, listing: Listing, after: str, until: s
     if until is not None:
         part.samples.append((until, part.entries))
     return part
-
-
-def spans(bounds: Sequence[str], count: int) -> list[Span]:
-    """The ranges between the bounds, in at most count spans of as many consecutive ranges."""
-    ordered = sorted(set(bounds))
-    ranges = len(ordered) + 1
-    count = min(count, ranges)
-    starts = [ranges * index // count for index in range(count + 1)]
-    return [
-        Span(
-            after="" if start == 0 else ordered[start - 1],
-            until=None if end == ranges else ordered[end - 1],
-            bounds=tuple(ordered[start : end - 1]),
-        )
-        for start, end in itertools.pairwise(starts)
-    ]
 
 
 def _reaches(name: str, group: bool, until: str) -> bool:

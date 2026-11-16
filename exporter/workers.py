@@ -1,9 +1,8 @@
 """Worker processes: each lists ranges with its own event loop, connections and core.
 
-A process reads about 700 pages a second on one core. The exporter's process keeps the HTTP
-server, the probes in flight and the learned bounds; it hands each worker consecutive ranges of a
-listing and merges the statistics they send back. The processes exchange pickled messages over
-pipes: they are one program, and trust each other.
+A process reads about 700 pages a second on one core. A worker process lists the ranges the
+exporter's process hands it, as the exporter's process would, and sends back what it found. The
+processes exchange pickled messages over pipes: they are one program, and trust each other.
 """
 
 import asyncio
@@ -18,20 +17,18 @@ from functools import partial
 from multiprocessing.connection import Connection
 from urllib.request import getproxies_environment
 
-import aiohttp
 from botocore.session import get_session
 
 from exporter.config import Settings
-from exporter.failures import LISTING_ERRORS, WorkerError
+from exporter.failures import LISTING_ERRORS, WorkerError, WorkerLostError
 from exporter.logs import configure_logging
 from exporter.loop import new_event_loop
+from exporter.ranges import LocalWorker, RangeJob
 from exporter.s3.client import http_client
-from exporter.s3.lister import Lister, RetryPolicy
 from exporter.s3.presigner import Endpoint, Presigner
 from exporter.s3.proxies import Proxies
 from exporter.s3.regions import Regions
-from exporter.s3.throttle import Throttle
-from exporter.scan import Listing, Scan, Span, scan, spans
+from exporter.scan import Scan
 
 log = logging.getLogger(__name__)
 
@@ -44,9 +41,7 @@ STOP_SECONDS = 5.0
 @dataclass(frozen=True, slots=True)
 class Job:
     id: int
-    listing: Listing
-    region: str
-    span: Span
+    range: RangeJob
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,50 +63,35 @@ class Failed:
     bug: bool = False
 
 
-class Workers:
-    """Worker processes, each started again when it stops."""
+class ProcessWorker:
+    """A worker process, started again when it stops."""
 
-    def __init__(self, count: int, settings: Settings, endpoint: Endpoint) -> None:
-        self._count = count
+    def __init__(self, settings: Settings, endpoint: Endpoint) -> None:
         self._settings = settings
         self._endpoint = endpoint
-        self._workers: list[_Worker] = []
         self._ids = itertools.count()
+        self._process = _Process(settings, endpoint, asyncio.get_running_loop())
 
-    def start(self) -> None:
-        self._workers = [self._new() for _ in range(self._count)]
+    async def list(self, job: RangeJob) -> Scan:
+        if not self._process.running:
+            self._process = _Process(self._settings, self._endpoint, asyncio.get_running_loop())
+        return await self._process.run(Job(next(self._ids), job))
 
-    async def scan(self, listing: Listing, region: str, bounds: Sequence[str]) -> Scan:
-        """Lists the ranges between the bounds, spread over the workers, and merges them."""
-        parts = spans(bounds, self._count)
-        workers = sorted(self._running(), key=_Worker.load)[: len(parts)]
-        try:
-            async with asyncio.TaskGroup() as group:
-                tasks = [
-                    group.create_task(worker.run(Job(next(self._ids), listing, region, span)))
-                    for worker, span in zip(workers, parts, strict=True)
-                ]
-        except ExceptionGroup as failures:
-            raise failures.exceptions[0] from None
-        total = Scan()
-        for task in tasks:
-            total.extend(task.result())
-        return total
+    def stop(self) -> None:
+        self._process.stop()
 
-    async def close(self) -> None:
-        for worker in self._workers:
-            worker.stop()
-        await asyncio.gather(*(asyncio.to_thread(worker.join) for worker in self._workers))
-
-    def _running(self) -> list["_Worker"]:
-        self._workers = [worker if worker.running else self._new() for worker in self._workers]
-        return self._workers
-
-    def _new(self) -> "_Worker":
-        return _Worker(self._settings, self._endpoint, asyncio.get_running_loop())
+    def join(self) -> None:
+        self._process.join()
 
 
-class _Worker:
+async def stop(workers: Sequence[ProcessWorker]) -> None:
+    """Stops the workers, killing those still running after a few seconds."""
+    for worker in workers:
+        worker.stop()
+    await asyncio.gather(*(asyncio.to_thread(worker.join) for worker in workers))
+
+
+class _Process:
     def __init__(
         self, settings: Settings, endpoint: Endpoint, loop: asyncio.AbstractEventLoop
     ) -> None:
@@ -133,9 +113,6 @@ class _Worker:
         self.running = True
         threading.Thread(target=self._receive, args=(results,), daemon=True).start()
 
-    def load(self) -> int:
-        return len(self._pending)
-
     async def run(self, job: Job) -> Scan:
         outcome: asyncio.Future[Listed | Failed] = self._loop.create_future()
         self._pending[job.id] = outcome
@@ -143,7 +120,7 @@ class _Worker:
             try:
                 self._jobs.send(job)
             except OSError:
-                raise WorkerError("the worker process stopped") from None
+                raise WorkerLostError("the worker process stopped") from None
             result = await outcome
         except asyncio.CancelledError:
             if self._pending.pop(job.id, None) is not None:
@@ -190,11 +167,11 @@ class _Worker:
             log.warning("worker process stopped", extra={"exit_code": exit_code})
         for outcome in self._pending.values():
             if not outcome.done():
-                outcome.set_exception(WorkerError("the worker process stopped"))
+                outcome.set_exception(WorkerLostError("the worker process stopped"))
 
 
 def work(jobs: Connection, outcomes: Connection, settings: Settings, endpoint: Endpoint) -> None:
-    """A worker process: lists the jobs it receives, until told to stop."""
+    """A worker process: lists the ranges it receives, until told to stop."""
     configure_logging(settings.log_level, settings.log_format, settings.log_stream)
     with asyncio.Runner(loop_factory=new_event_loop) as runner:
         runner.run(_work(jobs, outcomes, settings, endpoint))
@@ -208,15 +185,20 @@ async def _work(
     threading.Thread(target=_forward, args=forward, daemon=True).start()
     session = get_session()
     regions = Regions(lambda region: Presigner(session, region=region, endpoint=endpoint))
-    proxies = Proxies(getproxies_environment())
     running: dict[int, asyncio.Task[Scan]] = {}
     async with http_client(session, settings.list_concurrency) as http:
+        local = LocalWorker(
+            http,
+            regions,
+            concurrency=settings.list_concurrency,
+            proxies=Proxies(getproxies_environment()),
+        )
         while (message := await inbox.get()) is not None:
             if isinstance(message, Cancel):
                 if (task := running.pop(message.id, None)) is not None:
                     task.cancel()
                 continue
-            task = asyncio.create_task(_list(message, http, regions, proxies))
+            task = asyncio.create_task(local.list(message.range))
             running[message.id] = task
             task.add_done_callback(partial(_report, outcomes, running, message.id))
         for task in running.values():
@@ -233,13 +215,6 @@ def _forward(
         while (message := jobs.recv()) is not None:
             loop.call_soon_threadsafe(inbox.put_nowait, message)
     loop.call_soon_threadsafe(inbox.put_nowait, None)
-
-
-async def _list(job: Job, http: aiohttp.ClientSession, regions: Regions, proxies: Proxies) -> Scan:
-    span = job.span
-    throttle = Throttle(len(span.bounds) + 1)
-    lister = Lister(http, await regions.presigner(job.region), RetryPolicy(), proxies, throttle)
-    return await scan(lister, job.listing, span.bounds, after=span.after, until=span.until)
 
 
 def _report(

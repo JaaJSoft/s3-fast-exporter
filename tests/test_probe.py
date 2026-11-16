@@ -10,6 +10,7 @@ from listings import virtual_stats
 from servers import serve_app
 
 from exporter.probe import REMEMBERED_LISTINGS, Prober, ProbeResult
+from exporter.ranges import LocalWorker, RangeQueue
 from exporter.s3.lister import RetryPolicy
 from exporter.s3.presigner import Endpoint, Presigner
 from exporter.s3.regions import Regions
@@ -39,10 +40,9 @@ async def prober(
         return Presigner(session, region=region, endpoint=Endpoint(url, path_style=True))
 
     async with aiohttp.ClientSession() as http:
-        regions = Regions(new_presigner, "us-east-1")
-        probing = Prober(
-            http, regions, RetryPolicy(base_delay=0), concurrency=8, remembered=remembered
-        )
+        regions = Regions(new_presigner)
+        local = LocalWorker(http, regions, concurrency=8, retry=RetryPolicy(base_delay=0))
+        probing = Prober(regions, local, RangeQueue([(local, 8)]), remembered=remembered)
         yield probing
         await probing.close()
 
@@ -141,9 +141,10 @@ def test_a_probe_fails_at_its_timeout_while_the_scan_goes_on(aws_session: Sessio
     assert requests.total == 5
 
 
-def test_scans_slow_down_when_s3_answers_503(aws_session: Session) -> None:
-    # S3 answers 503 SlowDown past 3 requests in flight, and later scans run 8 ranges at once:
-    # at a fixed pace, their requests would run out of attempts.
+def test_scans_keep_the_pace_s3_accepts(aws_session: Session) -> None:
+    # S3 answers 503 SlowDown past 3 requests in flight, and later scans run 8 ranges at once.
+    # The bucket's queue keeps the pace from one scan to the next: each scan meets a few 503
+    # answers, as the pace probes for room, never a burst of them.
     requests, slow_downs = RequestCounter(), RequestCounter()
     throttled = create_app(
         {"bench": VirtualBucket("bench", OBJECTS)},
@@ -154,7 +155,7 @@ def test_scans_slow_down_when_s3_answers_503(aws_session: Session) -> None:
     with serve_app(throttled) as url:
         done = probes(aws_session, (url, requests), BENCH, BENCH, BENCH)
     assert all(result.stats == virtual_stats(OBJECTS) for result, _ in done)
-    assert 0 < slow_downs.total <= 36
+    assert 0 < slow_downs.total <= 24
 
 
 def test_closing_cancels_the_scans_in_flight(aws_session: Session) -> None:

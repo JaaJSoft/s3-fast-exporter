@@ -16,14 +16,14 @@ from exporter.config import Settings
 from exporter.exposition import CONTENT_TYPE, exporter_registry, probe_exposition
 from exporter.failures import LISTING_ERRORS
 from exporter.probe import Prober
+from exporter.ranges import LocalWorker, RangeQueue, RangeWorker
 from exporter.s3.account import Account
 from exporter.s3.client import http_client
-from exporter.s3.lister import RetryPolicy
 from exporter.s3.presigner import Endpoint, Presigner
 from exporter.s3.proxies import Proxies
 from exporter.s3.regions import Regions
 from exporter.scan import Listing
-from exporter.workers import Workers
+from exporter.workers import ProcessWorker, stop
 
 log = logging.getLogger(__name__)
 
@@ -75,26 +75,27 @@ def s3_context(session: Session) -> Callable[[web.Application], AsyncIterator[No
             # A custom endpoint is a single S3 service: its buckets share the configured region.
             lookup=account.bucket_region if endpoint.url is None else None,
         )
-        workers = None
-        if settings.list_processes > 1:
-            workers = Workers(settings.list_processes, settings, endpoint)
-            workers.start()
+        processes: list[ProcessWorker] = []
         try:
             async with http_client(session, settings.list_concurrency) as http:
-                prober = Prober(
+                local = LocalWorker(
                     http,
                     regions,
-                    RetryPolicy(),
-                    concurrency=settings.list_concurrency * settings.list_processes,
+                    concurrency=settings.list_concurrency,
                     proxies=Proxies(getproxies_environment()),
-                    workers=workers,
                 )
+                if settings.list_processes > 1:
+                    processes = [
+                        ProcessWorker(settings, endpoint) for _ in range(settings.list_processes)
+                    ]
+                workers: list[RangeWorker] = [*processes] or [local]
+                queue = RangeQueue([(worker, settings.list_concurrency) for worker in workers])
+                prober = Prober(regions, local, queue)
                 app[S3_ACCESS] = S3(account, prober)
                 yield
                 await prober.close()
         finally:
-            if workers is not None:
-                await workers.close()
+            await stop(processes)
 
     return context
 

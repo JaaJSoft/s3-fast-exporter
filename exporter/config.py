@@ -66,7 +66,7 @@ def parse_settings(argv: Sequence[str], environ: Mapping[str, str]) -> Settings:
     option(
         "s3.list-concurrency",
         str(LIST_CONCURRENCY),
-        "Most ListObjectsV2 requests a probe sends at once, per listing process.",
+        "Most ListObjectsV2 requests a listing process sends to a bucket at once.",
         _positive,
     )
     option(
