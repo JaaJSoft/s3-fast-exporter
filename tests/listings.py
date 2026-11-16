@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncGenerator
 
 from exporter.s3.scanner import ListPage, scan_list_page
-from exporter.stats import ListingStats
+from exporter.stats import SIZE_BUCKETS, ListingStats
 from fakes3 import responses
 from fakes3.app import decode_token, encode_token
 from fakes3.store import Bucket, list_page
@@ -53,16 +53,23 @@ def render_pages(bucket: Bucket, *, prefix: str, delimiter: str, max_keys: int) 
 
 def virtual_stats(objects: int) -> ListingStats:
     """The statistics of a virtual bucket of fakes3 holding that many objects."""
-    newest = max(range(objects), key=second_of)
-    second = second_of(newest)
+    sizes = [size_of(index) for index in range(objects)]
+    seconds = [second_of(index) for index in range(objects)]
+    newest = max(range(objects), key=seconds.__getitem__)
     return ListingStats(
         objects=objects,
-        total_size=sum(map(size_of, range(objects))),
-        biggest_size=max(map(size_of, range(objects))),
-        newest_date=f"{DATE}T{second // 3600:02d}:{second // 60 % 60:02d}:{second % 60:02d}"
-        f".000Z".encode(),
-        newest_size=size_of(newest),
+        total_size=sum(sizes),
+        biggest_size=max(sizes),
+        newest_date=_date(seconds[newest]),
+        newest_size=sizes[newest],
+        oldest_date=_date(min(seconds)),
+        size_buckets=[sum(size <= bound for size in sizes) for bound in SIZE_BUCKETS],
+        storage_classes={b"STANDARD": [objects, sum(sizes)]},
     )
+
+
+def _date(second: int) -> bytes:
+    return f"{DATE}T{second // 3600:02d}:{second // 60 % 60:02d}:{second % 60:02d}.000Z".encode()
 
 
 class StoreSource:

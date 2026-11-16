@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 from prometheus_client import (
     CollectorRegistry,
@@ -8,14 +8,19 @@ from prometheus_client import (
     ProcessCollector,
     generate_latest,
 )
-from prometheus_client.core import GaugeMetricFamily, Metric
+from prometheus_client.core import GaugeHistogramMetricFamily, GaugeMetricFamily, Metric
 from prometheus_client.registry import Collector
+from prometheus_client.utils import floatToGoString
 
 from exporter.probe import ProbeResult
+from exporter.stats import SIZE_BUCKETS, ListingStats
 
 CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 WITH_DELIMITER = ("bucket", "delimiter", "prefix")
 WITHOUT_DELIMITER = ("bucket", "prefix")
+BY_STORAGE_CLASS = ("bucket", "prefix", "storage_class")
+# How Prometheus clients write the bounds of histogram buckets, as in le="1.048576e+06".
+go_float: Callable[[float], str] = floatToGoString
 # Word for word from the upstream exporter: HELP texts are part of its metrics.
 HELP = {
     "s3_biggest_object_size_bytes": "The size of the biggest object",
@@ -28,6 +33,16 @@ HELP = {
     "s3_list_success": "If the ListObjects operation was a success",
     "s3_objects": "The total number of objects for the bucket/prefix combination",
     "s3_objects_size_sum_bytes": "The total size of all objects summed",
+}
+# Families the upstream exporter does not have.
+NEW_HELP = {
+    "s3_list_requests": "The number of ListObjectsV2 requests the listing sent, retries included",
+    "s3_list_slow_downs": "The number of ListObjectsV2 requests S3 answered with 503 SlowDown",
+    "s3_object_size_bytes": "The number of objects at or under each size",
+    "s3_oldest_object_date": "The last modified date of the object that was modified least "
+    "recently",
+    "s3_storage_class_objects": "The number of objects of each storage class",
+    "s3_storage_class_size_sum_bytes": "The total size of the objects of each storage class",
 }
 
 
@@ -57,26 +72,65 @@ class ProbeCollector(Collector):
         self._result = result
 
     def collect(self) -> Iterator[Metric]:
-        listing, stats = self._result.listing, self._result.stats
-        with_delimiter = (listing.bucket, listing.delimiter, listing.prefix)
-        without_delimiter = (listing.bucket, listing.prefix)
-        samples: list[tuple[str, tuple[str, ...], float]] = [
-            ("s3_list_success", with_delimiter, 0.0 if stats is None else 1.0)
-        ]
+        result = self._result
+        listing, stats = result.listing, result.stats
+        listed = (listing.bucket, listing.delimiter, listing.prefix)
+        success = 0.0 if stats is None else 1.0
+        families = [_gauge("s3_list_success", WITH_DELIMITER, listed, success)]
         if stats is not None:
-            samples.append(("s3_list_duration_seconds", with_delimiter, self._result.duration))
+            families += [
+                _gauge("s3_list_duration_seconds", WITH_DELIMITER, listed, result.duration),
+                _gauge("s3_list_requests", WITH_DELIMITER, listed, result.requests),
+                _gauge("s3_list_slow_downs", WITH_DELIMITER, listed, result.slow_downs),
+            ]
             if listing.delimiter:
-                samples.append(("s3_common_prefixes", with_delimiter, stats.common_prefixes))
+                families.append(
+                    _gauge("s3_common_prefixes", WITH_DELIMITER, listed, stats.common_prefixes)
+                )
             else:
-                samples += [
-                    ("s3_biggest_object_size_bytes", without_delimiter, stats.biggest_size),
-                    ("s3_last_modified_object_date", without_delimiter, stats.newest_epoch()),
-                    ("s3_last_modified_object_size_bytes", without_delimiter, stats.newest_size),
-                    ("s3_objects", without_delimiter, stats.objects),
-                    ("s3_objects_size_sum_bytes", without_delimiter, stats.total_size),
-                ]
-        for name, labels, value in sorted(samples):
-            names = WITH_DELIMITER if len(labels) == len(WITH_DELIMITER) else WITHOUT_DELIMITER
-            gauge = GaugeMetricFamily(name, HELP[name], labels=names)
-            gauge.add_metric(labels, float(value))
-            yield gauge
+                families += _object_families(listing.bucket, listing.prefix, stats)
+        yield from sorted(families, key=lambda family: family.name)
+
+
+def _object_families(bucket: str, prefix: str, stats: ListingStats) -> list[Metric]:
+    objects = (bucket, prefix)
+    sizes = GaugeHistogramMetricFamily(
+        "s3_object_size_bytes", NEW_HELP["s3_object_size_bytes"], labels=WITHOUT_DELIMITER
+    )
+    buckets = [
+        *(
+            (go_float(bound), count)
+            for bound, count in zip(SIZE_BUCKETS, stats.size_buckets, strict=True)
+        ),
+        ("+Inf", stats.objects),
+    ]
+    sizes.add_metric(list(objects), buckets, stats.total_size)
+    storage_objects = GaugeMetricFamily(
+        "s3_storage_class_objects", NEW_HELP["s3_storage_class_objects"], labels=BY_STORAGE_CLASS
+    )
+    storage_sizes = GaugeMetricFamily(
+        "s3_storage_class_size_sum_bytes",
+        NEW_HELP["s3_storage_class_size_sum_bytes"],
+        labels=BY_STORAGE_CLASS,
+    )
+    for storage_class, (count, size) in sorted(stats.storage_classes.items()):
+        labels = [bucket, prefix, storage_class.decode(errors="replace")]
+        storage_objects.add_metric(labels, float(count))
+        storage_sizes.add_metric(labels, float(size))
+    return [
+        _gauge("s3_biggest_object_size_bytes", WITHOUT_DELIMITER, objects, stats.biggest_size),
+        _gauge("s3_last_modified_object_date", WITHOUT_DELIMITER, objects, stats.newest_epoch()),
+        _gauge("s3_last_modified_object_size_bytes", WITHOUT_DELIMITER, objects, stats.newest_size),
+        _gauge("s3_objects", WITHOUT_DELIMITER, objects, stats.objects),
+        _gauge("s3_objects_size_sum_bytes", WITHOUT_DELIMITER, objects, stats.total_size),
+        _gauge("s3_oldest_object_date", WITHOUT_DELIMITER, objects, stats.oldest_epoch()),
+        sizes,
+        storage_objects,
+        storage_sizes,
+    ]
+
+
+def _gauge(name: str, names: tuple[str, ...], labels: tuple[str, ...], value: float) -> Metric:
+    gauge = GaugeMetricFamily(name, HELP.get(name) or NEW_HELP[name], labels=names)
+    gauge.add_metric(labels, float(value))
+    return gauge

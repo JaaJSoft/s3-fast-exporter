@@ -15,6 +15,7 @@ LAST_MODIFIED_WIDTH = len(b"2009-10-12T17:50:30.000Z")
 # Each appears once in each <Contents>, and nowhere else in a listing.
 SIZE = re.compile(rb"<Size>([0-9]+)</Size>")
 LAST_MODIFIED = re.compile(rb"<LastModified>([^<]*)</LastModified>")
+STORAGE_CLASS = re.compile(rb"<StorageClass>([^<]*)</StorageClass>")
 MAX_CODE_POINT = 0x10FFFF
 FIRST_SURROGATE, AFTER_SURROGATES = 0xD800, 0xE000
 
@@ -30,6 +31,7 @@ class ListPage:
     last_modified: list[bytes]
     common_prefixes: list[bytes]
     next_token: str | None
+    storage_classes: list[bytes] = field(default_factory=list)
     # Keys stay in the body: only a partitioned listing reads a few of them, at its bounds.
     body: bytes = field(default=b"", repr=False, compare=False)
 
@@ -59,6 +61,7 @@ class ListPage:
             self.last_modified[:keys],
             self.common_prefixes[:groups],
             None,
+            self.storage_classes[:keys],
             self.body,
         )
 
@@ -109,6 +112,7 @@ def scan_list_page(body: bytes) -> ListPage:
         raise ProtocolError("the listing is not URL-encoded")
     try:
         sizes, last_modified = _scan_contents(body)
+        storage_classes = _scan_storage_classes(body, len(sizes))
         key_count = int(_element(body, b"KeyCount") or b"")
     except ValueError:
         raise ProtocolError("malformed listing") from None
@@ -119,7 +123,7 @@ def scan_list_page(body: bytes) -> ListPage:
     common_prefixes = _scan_common_prefixes(body)
     if key_count != len(sizes) + len(common_prefixes):
         raise ProtocolError("<KeyCount> does not match the listed entries")
-    return ListPage(sizes, last_modified, common_prefixes, _next_token(body), body)
+    return ListPage(sizes, last_modified, common_prefixes, _next_token(body), storage_classes, body)
 
 
 def scan_error(body: bytes) -> tuple[str, str]:
@@ -138,6 +142,23 @@ def _scan_contents(body: bytes) -> tuple[list[int], list[bytes]]:
     if not len(sizes) == len(last_modified) == objects == body.count(b"</Contents>"):
         raise ValueError
     return sizes, last_modified
+
+
+def _scan_storage_classes(body: bytes, objects: int) -> list[bytes]:
+    """The storage class of each object, in the order of the listing."""
+    if not objects:
+        return []
+    start = body.find(b"<StorageClass>") + 14
+    if start < 14:
+        raise ValueError
+    first = body[start : body.find(b"<", start)]
+    # Pages of one class are the common case: one count, in C, checks every object.
+    if body.count(b"<StorageClass>" + first + b"</StorageClass>") == objects:
+        return [first] * objects
+    storage_classes: list[bytes] = STORAGE_CLASS.findall(body)
+    if len(storage_classes) != objects:
+        raise ValueError
+    return storage_classes
 
 
 def _scan_common_prefixes(body: bytes) -> list[bytes]:

@@ -29,10 +29,17 @@ def parse_exposition(text: str) -> dict[str, Family]:
     }
 
 
-def differences(expected: str, actual: str, *, varying: Set[str] = VARYING_VALUES) -> list[str]:
+def differences(
+    expected: str,
+    actual: str,
+    *,
+    varying: Set[str] = VARYING_VALUES,
+    new: Set[str] = frozenset(),
+) -> list[str]:
+    """new: families the actual exposition may have on top of the expected ones."""
     want, got = parse_exposition(expected), parse_exposition(actual)
     problems = [f"missing family {name}" for name in sorted(want.keys() - got.keys())]
-    problems += [f"unexpected family {name}" for name in sorted(got.keys() - want.keys())]
+    problems += [f"unexpected family {name}" for name in sorted(got.keys() - want.keys() - new)]
     for name in sorted(want.keys() & got.keys()):
         problems += _family_differences(name, want[name], got[name], name in varying)
     return problems

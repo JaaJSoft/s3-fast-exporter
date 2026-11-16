@@ -77,7 +77,9 @@ class LocalWorker:
 
     async def list(self, job: RangeJob) -> Scan:
         lister = await self.lister(job.listing.bucket, job.region)
-        return await scan_range(lister, job.listing, job.after, job.until)
+        part = await scan_range(lister, job.listing, job.after, job.until)
+        part.requests, part.slow_downs = lister.requests, lister.slow_downs
+        return part
 
     def _forget_idle(self, kept: str) -> None:
         # A throttle with requests in flight or waiting stays: forgetting it would let a second

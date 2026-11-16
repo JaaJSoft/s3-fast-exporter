@@ -123,6 +123,22 @@ listing of the prefix splits along its pages.
 With a delimiter, only `s3_common_prefixes`, `s3_list_success` and `s3_list_duration_seconds`
 are reported, as upstream does.
 
+This exporter adds metric families of its own, from the same listing and at no extra request.
+The upstream families above are left as they were.
+
+| Metric | Labels | Value |
+|---|---|---|
+| `s3_oldest_object_date` | bucket, prefix | modification date of the least recently modified object, in seconds since the epoch; 0 when nothing is listed |
+| `s3_object_size_bytes` | bucket, prefix, le | objects of at most `le` bytes; a gauge histogram, with `_gcount` and `_gsum` |
+| `s3_storage_class_objects` | bucket, prefix, storage_class | number of objects of each storage class |
+| `s3_storage_class_size_sum_bytes` | bucket, prefix, storage_class | total size of the objects of each storage class |
+| `s3_list_requests` | bucket, prefix, delimiter | ListObjectsV2 requests the listing sent, retries included |
+| `s3_list_slow_downs` | bucket, prefix, delimiter | requests S3 answered with `503 SlowDown` |
+
+The size buckets are 0, 1 KiB, 128 KiB (the smallest size S3 bills in the infrequent access and
+Glacier Instant Retrieval classes), 1 MiB, 16 MiB, 256 MiB, 1 GiB and 5 GiB (the largest single
+upload). Probes that share a listing report its requests each.
+
 ## Prometheus configuration
 
 Probe a fixed list of buckets and prefixes:
@@ -183,6 +199,12 @@ Alert when the newest object of a prefix is more than a day old:
 (time() - s3_last_modified_object_date) / 3600 > 24
 ```
 
+Alert when a prefix keeps objects past a 90-day retention, a lifecycle rule that does not run:
+
+```
+s3_objects > 0 and (time() - s3_oldest_object_date) / 86400 > 90
+```
+
 ## Migrating from ribbybibby/s3_exporter
 
 Replace the image and keep everything else. Flags, `S3_EXPORTER_*` variables, port and paths are
@@ -199,6 +221,7 @@ Two values differ on purpose:
 Other changes:
 
 - Buckets outside the default region now work; upstream failed on them.
+- New metric families, listed under [Metrics](#metrics), come on top of the upstream ones.
 - Prefixes are listed in parallel ranges, and probes arriving during the listing of the same
   bucket, prefix and delimiter share its result, `s3_list_duration_seconds` included.
 - `--s3.list-concurrency` and `--s3.list-processes` are new.

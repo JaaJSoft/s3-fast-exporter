@@ -24,7 +24,7 @@ from fakes3.store import Bucket, StoredObject
 
 OPERATION = get_session().get_service_model("s3").operation_model("ListObjectsV2")
 
-type View = tuple[list[int], list[str], list[str], str | None]
+type View = tuple[list[int], list[str], list[str], list[str], str | None]
 
 
 def botocore_parse(body: bytes) -> dict[str, Any]:
@@ -40,6 +40,7 @@ def botocore_view(body: bytes) -> View:
     return (
         [obj["Size"] for obj in contents],
         [responses.timestamp(obj["LastModified"]) for obj in contents],
+        [obj["StorageClass"] for obj in contents],
         [common["Prefix"] for common in parsed.get("CommonPrefixes", [])],
         parsed.get("NextContinuationToken"),
     )
@@ -49,6 +50,7 @@ def scanner_view(page: ListPage) -> View:
     return (
         page.sizes,
         [date.decode() for date in page.last_modified],
+        [storage.decode() for storage in page.storage_classes],
         [unquote_plus(prefix.decode()) for prefix in page.common_prefixes],
         page.next_token,
     )
@@ -64,11 +66,13 @@ def test_golden_pages_read_like_botocore(probe: Probe) -> None:
 
 
 keys = st.text(st.characters(codec="utf-8"), min_size=1, max_size=20)
+storage_classes = st.sampled_from(["STANDARD", "STANDARD_IA", "GLACIER", "DEEP_ARCHIVE"])
 objects = st.lists(
     st.tuples(
         keys,
         st.integers(0, 5 * 2**40),
         st.datetimes(datetime(1990, 1, 1), datetime(2100, 1, 1), timezones=st.just(UTC)),
+        storage_classes,
     ),
     max_size=25,
     unique_by=lambda obj: obj[0],
@@ -83,9 +87,11 @@ objects = st.lists(
     st.integers(1, 8),
 )
 def test_random_pages_read_like_botocore(
-    objects: list[tuple[str, int, datetime]], prefix: str, delimiter: str, max_keys: int
+    objects: list[tuple[str, int, datetime, str]], prefix: str, delimiter: str, max_keys: int
 ) -> None:
-    bucket = Bucket("bucket", (StoredObject(key, size, date) for key, size, date in objects))
+    bucket = Bucket(
+        "bucket", (StoredObject(key, size, date, storage) for key, size, date, storage in objects)
+    )
     for body in render_pages(bucket, prefix=prefix, delimiter=delimiter, max_keys=max_keys):
         assert scanner_view(scan_list_page(body)) == botocore_view(body)
 
@@ -99,13 +105,15 @@ def test_random_pages_read_like_botocore(
     keys,
 )
 def test_pages_start_end_and_cut_where_botocore_names_say(
-    objects: list[tuple[str, int, datetime]],
+    objects: list[tuple[str, int, datetime, str]],
     prefix: str,
     delimiter: str,
     max_keys: int,
     bound: str,
 ) -> None:
-    bucket = Bucket("bucket", (StoredObject(key, size, date) for key, size, date in objects))
+    bucket = Bucket(
+        "bucket", (StoredObject(key, size, date, storage) for key, size, date, storage in objects)
+    )
     for body in render_pages(bucket, prefix=prefix, delimiter=delimiter, max_keys=max_keys):
         page, parsed = scan_list_page(body), botocore_parse(body)
         contents = parsed.get("Contents", [])
@@ -171,7 +179,7 @@ EMPTY = (
 ONE = EMPTY.replace(b"<KeyCount>0", b"<KeyCount>1").replace(
     b"</ListBucketResult>",
     b"<Contents><Key>a</Key><LastModified>2026-11-16T10:00:00.000Z</LastModified>"
-    b"<Size>3</Size></Contents></ListBucketResult>",
+    b"<Size>3</Size><StorageClass>GLACIER</StorageClass></Contents></ListBucketResult>",
 )
 
 
@@ -200,6 +208,11 @@ def test_an_empty_listing_has_nothing() -> None:
         pytest.param(ONE.replace(b"<Size>3", b"<Size>three"), "malformed listing", id="bad-size"),
         pytest.param(ONE.replace(b":00.000Z", b":00Z"), "<LastModified>", id="short-date"),
         pytest.param(ONE.replace(b"</Contents>", b""), "malformed listing", id="unterminated"),
+        pytest.param(
+            ONE.replace(b"<StorageClass>GLACIER</StorageClass>", b""),
+            "malformed listing",
+            id="no-storage-class",
+        ),
     ],
 )
 def test_protocol_violations_are_errors(body: bytes, reason: str) -> None:
