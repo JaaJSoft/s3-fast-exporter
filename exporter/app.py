@@ -5,6 +5,7 @@ import ssl
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from html import escape
+from urllib.request import getproxies_environment
 
 import aiohttp
 from aiohttp import web
@@ -14,25 +15,25 @@ from prometheus_client import CollectorRegistry, generate_latest
 from exporter import __version__
 from exporter.config import Settings
 from exporter.exposition import CONTENT_TYPE, exporter_registry, probe_exposition
-from exporter.probe import LISTING_ERRORS, run_probe
+from exporter.probe import LISTING_ERRORS, Prober
 from exporter.s3.account import Account
 from exporter.s3.lister import RetryPolicy
 from exporter.s3.presigner import Endpoint, Presigner
+from exporter.s3.proxies import Proxies
 from exporter.s3.regions import Regions
+from exporter.scan import Listing
 
 log = logging.getLogger(__name__)
 
-CONNECTIONS = 64
+MIN_CONNECTIONS = 64
 TIMEOUT = aiohttp.ClientTimeout(total=None, connect=10, sock_read=60)
 NOSNIFF = {"X-Content-Type-Options": "nosniff"}
 
 
 @dataclass(frozen=True, slots=True)
 class S3:
-    http: aiohttp.ClientSession
-    regions: Regions
     account: Account
-    retry: RetryPolicy
+    prober: Prober
 
 
 SETTINGS: web.AppKey[Settings] = web.AppKey("settings")
@@ -45,6 +46,7 @@ def create_app(settings: Settings, session: Session | None = None) -> web.Applic
     app[SETTINGS] = settings
     app[REGISTRY] = exporter_registry(__version__)
     app.cleanup_ctx.append(s3_context(session or get_session()))
+    app.on_shutdown.append(stop_scans)
     app.router.add_get(settings.probe_path, probe)
     app.router.add_get(settings.discovery_path, discovery)
     app.router.add_get(settings.metrics_path, metrics)
@@ -71,29 +73,37 @@ def s3_context(session: Session) -> Callable[[web.Application], AsyncIterator[No
             lookup=account.bucket_region if endpoint.url is None else None,
         )
         tls = ssl.create_default_context(cafile=session.get_config_variable("ca_bundle"))
-        connector = aiohttp.TCPConnector(limit=CONNECTIONS, ttl_dns_cache=300, ssl=tls)
-        async with aiohttp.ClientSession(
-            connector=connector, timeout=TIMEOUT, trust_env=True
-        ) as http:
-            app[S3_ACCESS] = S3(http, regions, account, RetryPolicy())
+        # Room for two probes at full speed; more probes share the connections.
+        connections = max(MIN_CONNECTIONS, 2 * settings.list_concurrency)
+        connector = aiohttp.TCPConnector(limit=connections, ttl_dns_cache=300, ssl=tls)
+        async with aiohttp.ClientSession(connector=connector, timeout=TIMEOUT) as http:
+            prober = Prober(
+                http,
+                regions,
+                RetryPolicy(),
+                concurrency=settings.list_concurrency,
+                proxies=Proxies(getproxies_environment()),
+            )
+            app[S3_ACCESS] = S3(account, prober)
             yield
+            await prober.close()
 
     return context
+
+
+async def stop_scans(app: web.Application) -> None:
+    # Runs before the server waits for the requests in flight: probes waiting for a long scan
+    # fail at once instead of holding the shutdown.
+    if (s3 := app.get(S3_ACCESS)) is not None:
+        await s3.prober.close()
 
 
 async def probe(request: web.Request) -> web.Response:
     bucket = request.query.get("bucket", "")
     if not bucket:
         return web.Response(status=400, text="bucket parameter is missing\n", headers=NOSNIFF)
-    s3 = request.app[S3_ACCESS]
-    result = await run_probe(
-        s3.http,
-        s3.regions,
-        s3.retry,
-        bucket=bucket,
-        prefix=request.query.get("prefix", ""),
-        delimiter=request.query.get("delimiter", ""),
-    )
+    listing = Listing(bucket, request.query.get("prefix", ""), request.query.get("delimiter", ""))
+    result = await request.app[S3_ACCESS].prober.probe(listing)
     return web.Response(body=probe_exposition(result), headers={"Content-Type": CONTENT_TYPE})
 
 

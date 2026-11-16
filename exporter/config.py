@@ -1,7 +1,7 @@
 """Command line flags and S3_EXPORTER_* variables, named as the upstream exporter named them."""
 
 import argparse
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from exporter import __version__
@@ -10,6 +10,7 @@ ENV_PREFIX = "S3_EXPORTER_"
 LOG_LEVELS = ("debug", "info", "warn", "error", "fatal")
 TRUE_VALUES = frozenset({"1", "t", "T", "TRUE", "true", "True"})
 FALSE_VALUES = frozenset({"0", "f", "F", "FALSE", "false", "False"})
+LIST_CONCURRENCY = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +23,7 @@ class Settings:
     endpoint_url: str | None
     disable_ssl: bool
     force_path_style: bool
+    list_concurrency: int
     log_level: str
     log_format: str
     log_stream: str
@@ -32,9 +34,13 @@ def parse_settings(argv: Sequence[str], environ: Mapping[str, str]) -> Settings:
         prog="s3-fast-exporter", description="Prometheus exporter for S3 buckets and objects."
     )
 
-    def option(flag: str, default: str, help: str) -> None:
+    def option(flag: str, default: str, help: str, parse: Callable[[str], object] = str) -> None:
         parser.add_argument(
-            f"--{flag}", dest=_dest(flag), default=environ.get(_env(flag), default), help=help
+            f"--{flag}",
+            dest=_dest(flag),
+            default=environ.get(_env(flag), default),
+            type=parse,
+            help=help,
         )
 
     def switch(flag: str, help: str) -> None:
@@ -56,6 +62,12 @@ def parse_settings(argv: Sequence[str], environ: Mapping[str, str]) -> Settings:
     option("s3.endpoint-url", "", "Custom S3 endpoint URL.")
     switch("s3.disable-ssl", "Talk to S3 over HTTP instead of HTTPS.")
     switch("s3.force-path-style", "Address buckets with path-style instead of virtual-hosted URLs.")
+    option(
+        "s3.list-concurrency",
+        str(LIST_CONCURRENCY),
+        "Most ListObjectsV2 requests a probe sends at once.",
+        _positive,
+    )
     option("log.level", "info", f"Lowest severity logged: {', '.join(LOG_LEVELS)}.")
     option(
         "log.format", "logfmt", "logfmt or json; upstream values such as logger:stderr also work."
@@ -81,6 +93,7 @@ def parse_settings(argv: Sequence[str], environ: Mapping[str, str]) -> Settings:
         endpoint_url=args.s3_endpoint_url or None,
         disable_ssl=args.s3_disable_ssl,
         force_path_style=args.s3_force_path_style,
+        list_concurrency=args.s3_list_concurrency,
         log_level=args.log_level,
         log_format=log_format,
         log_stream=log_stream,
@@ -93,6 +106,12 @@ def _dest(flag: str) -> str:
 
 def _env(flag: str) -> str:
     return ENV_PREFIX + _dest(flag).upper()
+
+
+def _positive(value: str) -> int:
+    if not value.isdigit() or int(value) < 1:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
+    return int(value)
 
 
 def _listen_address(address: str) -> tuple[str | None, int]:

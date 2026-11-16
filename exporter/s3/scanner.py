@@ -4,10 +4,15 @@ The listing is requested with encoding-type=url, so keys and prefixes never cont
 locating elements by their tags is exact, and much cheaper than a generic XML parser.
 """
 
-from dataclasses import dataclass
+import html
+from bisect import bisect_right
+from dataclasses import dataclass, field
+from urllib.parse import unquote_plus
 from xml.sax.saxutils import unescape
 
 LAST_MODIFIED_WIDTH = len(b"2009-10-12T17:50:30.000Z")
+MAX_CODE_POINT = 0x10FFFF
+FIRST_SURROGATE, AFTER_SURROGATES = 0xD800, 0xE000
 
 
 class ProtocolError(Exception):
@@ -21,6 +26,78 @@ class ListPage:
     last_modified: list[bytes]
     common_prefixes: list[bytes]
     next_token: str | None
+    # Keys stay in the body: only a partitioned listing reads a few of them, at its bounds.
+    body: bytes = field(default=b"", repr=False, compare=False)
+
+    def start(self) -> str | None:
+        """The first key or common prefix of the page."""
+        starts = []
+        if self.sizes:
+            starts.append(self._key(self.body.find(b"<Key>") + 5))
+        if self.common_prefixes:
+            starts.append(decode(self.common_prefixes[0]))
+        return min(starts, default=None)
+
+    def last(self) -> tuple[str, bool] | None:
+        """The last key or common prefix of the page, and whether it is a common prefix."""
+        key = self._key(self.body.rfind(b"<Key>") + 5) if self.sizes else None
+        group = decode(self.common_prefixes[-1]) if self.common_prefixes else None
+        if group is not None and (key is None or group > key):
+            return group, True
+        return None if key is None else (key, False)
+
+    def up_to(self, bound: str) -> "ListPage":
+        """This page without the keys and groups listed after bound."""
+        keys = bisect_right(self._key_starts(), bound, key=self._key)
+        groups = bisect_right(self.common_prefixes, bound, key=decode)
+        return ListPage(
+            self.sizes[:keys],
+            self.last_modified[:keys],
+            self.common_prefixes[:groups],
+            None,
+            self.body,
+        )
+
+    def _key(self, start: int) -> str:
+        if start < 5:
+            raise ProtocolError("a listed object has no <Key>")
+        return decode(self.body[start : self.body.find(b"<", start)])
+
+    def _key_starts(self) -> list[int]:
+        find = self.body.find
+        starts = []
+        start = find(b"<Key>")
+        while start >= 0:
+            starts.append(start + 5)
+            start = find(b"<Key>", start + 5)
+        if len(starts) != len(self.sizes):
+            raise ProtocolError("<Key> elements do not match the listed objects")
+        return starts
+
+
+def decode(listed: bytes) -> str:
+    """A key or prefix as an encoding-type=url listing gives it."""
+    try:
+        text = listed.decode()
+        if "&" in text:
+            # Valid XML text only holds the predefined and numeric references, which
+            # html.unescape decodes as an XML parser does.
+            text = html.unescape(text)
+        return unquote_plus(text, errors="strict")
+    except UnicodeDecodeError:
+        raise ProtocolError("a listed name is not UTF-8") from None
+
+
+def group_end(prefix: str) -> str | None:
+    """The smallest string above every string that starts with prefix, if there is one.
+
+    Code point order is UTF-8 byte order, the order S3 lists keys in.
+    """
+    stem = prefix.rstrip(chr(MAX_CODE_POINT))
+    if not stem:
+        return None
+    code = ord(stem[-1]) + 1
+    return stem[:-1] + chr(AFTER_SURROGATES if code == FIRST_SURROGATE else code)
 
 
 def scan_list_page(body: bytes) -> ListPage:
@@ -38,7 +115,7 @@ def scan_list_page(body: bytes) -> ListPage:
     common_prefixes = _scan_common_prefixes(body)
     if key_count != len(sizes) + len(common_prefixes):
         raise ProtocolError("<KeyCount> does not match the listed entries")
-    return ListPage(sizes, last_modified, common_prefixes, _next_token(body))
+    return ListPage(sizes, last_modified, common_prefixes, _next_token(body), body)
 
 
 def scan_error(body: bytes) -> tuple[str, str]:

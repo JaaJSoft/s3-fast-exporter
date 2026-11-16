@@ -1,48 +1,147 @@
-from exporter.probe import ListingStats
-from exporter.s3.scanner import ListPage
+import asyncio
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
+
+import aiohttp
+import pytest
+from botocore.session import Session
+from servers import serve_app
+
+from exporter.probe import REMEMBERED_LISTINGS, Prober, ProbeResult
+from exporter.s3.lister import RetryPolicy
+from exporter.s3.presigner import Endpoint, Presigner
+from exporter.s3.regions import Regions
+from exporter.scan import Listing
+from exporter.stats import ListingStats
+from fakes3.app import RequestCounter, create_app
+from fakes3.golden import golden_buckets
+from fakes3.store import Listable
+from fakes3.virtual import DATE, VirtualBucket, second_of, size_of
+
+OBJECTS = 40_000
+BENCH = Listing("bench", "data/")
 
 
-def page(*objects: tuple[int, str], prefixes: int = 0) -> ListPage:
-    return ListPage(
-        sizes=[size for size, _ in objects],
-        last_modified=[date.encode() for _, date in objects],
-        common_prefixes=[b"p/"] * prefixes,
-        next_token=None,
+@pytest.fixture(scope="module")
+def fakes3() -> Iterator[tuple[str, RequestCounter]]:
+    requests = RequestCounter()
+    buckets: dict[str, Listable] = {**golden_buckets(), "bench": VirtualBucket("bench", OBJECTS)}
+    with serve_app(create_app(buckets, list_requests=requests)) as url:
+        yield url, requests
+
+
+@asynccontextmanager
+async def prober(
+    session: Session, url: str, remembered: int = REMEMBERED_LISTINGS
+) -> AsyncIterator[Prober]:
+    def new_presigner(region: str) -> Presigner:
+        return Presigner(session, region=region, endpoint=Endpoint(url, path_style=True))
+
+    async with aiohttp.ClientSession() as http:
+        regions = Regions(new_presigner, "us-east-1")
+        probing = Prober(
+            http, regions, RetryPolicy(base_delay=0), concurrency=8, remembered=remembered
+        )
+        yield probing
+        await probing.close()
+
+
+def probes(
+    session: Session,
+    fakes3: tuple[str, RequestCounter],
+    *listings: Listing,
+    remembered: int = REMEMBERED_LISTINGS,
+) -> list[tuple[ProbeResult, int]]:
+    """Each listing probed in turn by one prober, with the requests its probe sent."""
+    url, requests = fakes3
+
+    async def run() -> list[tuple[ProbeResult, int]]:
+        done = []
+        async with prober(session, url, remembered) as probing:
+            for listing in listings:
+                before = requests.total
+                done.append((await probing.probe(listing), requests.total - before))
+        return done
+
+    return asyncio.run(run())
+
+
+def expected_stats() -> ListingStats:
+    newest = max(range(OBJECTS), key=second_of)
+    second = second_of(newest)
+    return ListingStats(
+        objects=OBJECTS,
+        total_size=sum(map(size_of, range(OBJECTS))),
+        biggest_size=max(map(size_of, range(OBJECTS))),
+        newest_date=f"{DATE}T{second // 3600:02d}:{second // 60 % 60:02d}:{second % 60:02d}"
+        f".000Z".encode(),
+        newest_size=size_of(newest),
     )
 
 
-def stats_of(*pages: ListPage) -> ListingStats:
-    stats = ListingStats()
-    for each in pages:
-        stats.add(each)
-    return stats
+def test_each_scan_splits_along_the_page_ends_of_the_previous_one(
+    aws_session: Session, fakes3: tuple[str, RequestCounter]
+) -> None:
+    first, second, third = probes(aws_session, fakes3, BENCH, BENCH, BENCH)
+    # One request finds the four groups of data/, then each of the first three ranges reads
+    # one page into the next group. Later scans cut 8 ranges at page ends: no request is lost.
+    assert [requests for _, requests in (first, second, third)] == [44, 40, 40]
+    assert first[0].stats == second[0].stats == third[0].stats == expected_stats()
 
 
-def test_nothing_listed_dates_at_zero() -> None:
-    stats = stats_of(page(), page())
-    assert (stats.objects, stats.total_size, stats.biggest_size, stats.newest_size) == (0, 0, 0, 0)
-    assert stats.newest_epoch() == 0
+def test_probes_arriving_during_a_scan_share_it(
+    aws_session: Session, fakes3: tuple[str, RequestCounter]
+) -> None:
+    url, requests = fakes3
+
+    async def run() -> tuple[list[ProbeResult], int]:
+        async with prober(aws_session, url) as probing:
+            before = requests.total
+            results = await asyncio.gather(*(probing.probe(BENCH) for _ in range(5)))
+            return results, requests.total - before
+
+    results, sent = asyncio.run(run())
+    assert sent == 44
+    assert all(result is results[0] for result in results)
 
 
-def test_the_first_of_equally_new_objects_wins_within_and_across_pages() -> None:
-    noon = "2026-06-01T12:00:00.000Z"
-    stats = stats_of(page((1, noon), (2, noon)), page((3, noon)))
-    assert stats.newest_size == 1
+def test_listings_with_a_delimiter_start_without_discovery(
+    aws_session: Session, fakes3: tuple[str, RequestCounter]
+) -> None:
+    [(result, requests)] = probes(aws_session, fakes3, Listing("bench", "data/", "/"))
+    assert requests == 1
+    assert result.stats is not None
+    assert result.stats.common_prefixes == OBJECTS // 10_000
 
 
-def test_a_strictly_newer_object_on_a_later_page_wins() -> None:
-    stats = stats_of(page((1, "2026-06-01T12:00:00.100Z")), page((2, "2026-06-01T12:00:00.900Z")))
-    assert stats.newest_size == 2
-    assert stats.newest_epoch() == 1780315200
+def test_forgotten_listings_are_discovered_again(
+    aws_session: Session, fakes3: tuple[str, RequestCounter]
+) -> None:
+    done = probes(aws_session, fakes3, BENCH, Listing("single"), BENCH, remembered=1)
+    assert [requests for _, requests in done] == [44, 2, 44]
 
 
-def test_sums_are_exact_beyond_float_precision() -> None:
-    date = "2026-11-01T00:00:00.000Z"
-    stats = stats_of(page((2**53, date), (1, date)), page((2**60, date)))
-    assert stats.total_size == 2**60 + 2**53 + 1
-    assert stats.biggest_size == 2**60
-    assert stats.objects == 3
+def test_a_failed_listing_has_no_stats(
+    aws_session: Session, fakes3: tuple[str, RequestCounter]
+) -> None:
+    [(result, _)] = probes(aws_session, fakes3, Listing("missing"))
+    assert result.listing == Listing("missing")
+    assert result.stats is None
 
 
-def test_common_prefixes_add_up_over_pages() -> None:
-    assert stats_of(page(prefixes=1000), page(prefixes=200)).common_prefixes == 1200
+def test_closing_cancels_the_scans_in_flight(aws_session: Session) -> None:
+    async def run() -> None:
+        async def never_answer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            await reader.read()
+            writer.close()
+
+        server = await asyncio.start_server(never_answer, "127.0.0.1", 0)
+        host, port = server.sockets[0].getsockname()[:2]
+        async with server, prober(aws_session, f"http://{host}:{port}") as probing:
+            probe = asyncio.ensure_future(probing.probe(Listing("bucket")))
+            await asyncio.sleep(0.2)
+            await probing.close()
+            with pytest.raises(asyncio.CancelledError):
+                await probe
+
+    asyncio.run(run())

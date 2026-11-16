@@ -57,15 +57,15 @@ class ProbeCollector(Collector):
         self._result = result
 
     def collect(self) -> Iterator[Metric]:
-        result, stats = self._result, self._result.stats
-        with_delimiter = (result.bucket, result.delimiter, result.prefix)
-        without_delimiter = (result.bucket, result.prefix)
+        listing, stats = self._result.listing, self._result.stats
+        with_delimiter = (listing.bucket, listing.delimiter, listing.prefix)
+        without_delimiter = (listing.bucket, listing.prefix)
         samples: list[tuple[str, tuple[str, ...], float]] = [
             ("s3_list_success", with_delimiter, 0.0 if stats is None else 1.0)
         ]
         if stats is not None:
-            samples.append(("s3_list_duration_seconds", with_delimiter, result.duration))
-            if result.delimiter:
+            samples.append(("s3_list_duration_seconds", with_delimiter, self._result.duration))
+            if listing.delimiter:
                 samples.append(("s3_common_prefixes", with_delimiter, stats.common_prefixes))
             else:
                 samples += [
