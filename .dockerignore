@@ -1,5 +1,9 @@
 *
 !pyproject.toml
 !uv.lock
+!README.md
+!LICENSE
+!NOTICE
+!exporter/
 !fakes3/
 **/__pycache__

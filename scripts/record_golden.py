@@ -23,7 +23,7 @@ def main() -> None:
     GOLDEN.mkdir(parents=True, exist_ok=True)
     for stale in GOLDEN.iterdir():
         stale.unlink()
-    compose("up", "--detach", "--build", "--wait")
+    compose("up", "--detach", "--build", "--wait", "fakes3", "upstream")
     try:
         wait_for_upstream()
         crashes = {}

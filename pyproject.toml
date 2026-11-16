@@ -3,6 +3,7 @@ name = "s3-fast-exporter"
 version = "0.1.0.dev0"
 description = "Prometheus exporter for S3 buckets and objects, built for large buckets."
 readme = "README.md"
+authors = [{ name = "JaaJSoft" }]
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
