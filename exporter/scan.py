@@ -163,6 +163,9 @@ def balanced_bounds(scan: Scan, ranges: int) -> list[str]:
             nearest -= 1
         if nearest < 0:
             continue
+        # A range that ends inside a page adds a sample at its bound, with the count of the page
+        # end before it: a range ending at that page end needs no page past its bound.
+        nearest = bisect_left(counts, counts[nearest])
         end, count = scan.samples[nearest]
         if 0 < count < scan.entries and (not bounds or end > bounds[-1]):
             bounds.append(end)

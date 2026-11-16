@@ -153,6 +153,21 @@ def test_learned_ranges_are_even_and_cost_no_extra_request(loop: asyncio.Runner)
     assert balanced_bounds(split, 4) == bounds
 
 
+@pytest.mark.parametrize("ranges", range(2, 12))
+def test_scans_after_a_discovered_one_cost_the_requests_of_a_single_listing(
+    loop: asyncio.Runner, ranges: int
+) -> None:
+    # Six groups of three pages each: the first scan splits at the groups, and each of its
+    # ranges reads one page into the next group. Later scans split at page ends only.
+    source = StoreSource(named(*(f"{group}/{key:02d}" for group in "abcdef" for key in range(12))))
+    source.max_keys = 4
+    single = loop.run(scan(source, LISTING))
+    first = loop.run(scan(source, LISTING, loop.run(discover_bounds(source, LISTING, 64))))
+    source.requests = 0
+    loop.run(scan(source, LISTING, balanced_bounds(first, ranges)))
+    assert source.requests == single.pages
+
+
 def test_listings_of_few_pages_are_not_split(loop: asyncio.Runner) -> None:
     source = StoreSource(named(*"abcdefgh"), max_keys=1)
     result = loop.run(scan(source, LISTING))
