@@ -33,7 +33,7 @@ class LogfmtFormatter(logging.Formatter):
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
-        return json.dumps(fields(record), default=str, ensure_ascii=False)
+        return _to_json(fields(record))
 
 
 def fields(record: logging.LogRecord) -> dict[str, object]:
@@ -54,4 +54,11 @@ def _logfmt(value: object) -> str:
     text = str(value)
     if text and text.isprintable() and not any(char in text for char in ' ="\\'):
         return text
-    return json.dumps(text, ensure_ascii=False)
+    return _to_json(text)
+
+
+def _to_json(value: object) -> str:
+    text = json.dumps(value, default=str, ensure_ascii=False)
+    # json.dumps keeps U+2028, U+2029, U+0085 and other non-ASCII separators as they are, and
+    # some log pipelines break lines on them: every unprintable character gets a \u escape.
+    return "".join(char if char.isprintable() else json.dumps(char)[1:-1] for char in text)

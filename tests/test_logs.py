@@ -44,10 +44,17 @@ def test_logfmt_quotes_values_that_need_it() -> None:
     )
 
 
-def test_user_input_cannot_forge_a_log_line() -> None:
-    for formatter in (LogfmtFormatter(), JsonFormatter()):
-        line = formatter.format(record("listing failed", prefix="x\nlevel=error msg=forged"))
-        assert "\n" not in line
+@pytest.mark.parametrize("separator", ["\n", "\r", "\x85", "\u2028", "\u2029", "\x1b"])
+@pytest.mark.parametrize("formatter", [LogfmtFormatter(), JsonFormatter()], ids=["logfmt", "json"])
+def test_user_input_cannot_forge_a_log_line(formatter: logging.Formatter, separator: str) -> None:
+    line = formatter.format(record("listing failed", prefix=f"é{separator}level=error msg=forged"))
+    assert line.isprintable()
+    assert "é" in line
+
+
+def test_escaped_json_lines_still_round_trip() -> None:
+    prefix = "é\u2028\x85\U0001f642\n"
+    assert json.loads(JsonFormatter().format(record("m", prefix=prefix)))["prefix"] == prefix
 
 
 def test_json_lines_carry_the_extra_fields() -> None:
