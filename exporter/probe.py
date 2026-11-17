@@ -20,6 +20,8 @@ class ProbeResult:
     listing: Listing
     stats: ListingStats | None
     duration: float
+    requests: int = 0
+    slow_downs: int = 0
 
 
 class Prober:
@@ -79,6 +81,8 @@ class Prober:
             if bounds is None and ranges > 1 and not listing.delimiter:
                 lister = await self._local.lister(listing.bucket, region)
                 result = await discover(list_range, lister, listing, ranges)
+                result.requests += lister.requests
+                result.slow_downs += lister.slow_downs
             else:
                 result = await scan(list_range, bounds or ())
         except LISTING_ERRORS as error:
@@ -86,7 +90,8 @@ class Prober:
             log.warning("listing failed", extra=_fields(listing, error=str(error)))
             return ProbeResult(listing, None, time.perf_counter() - started)
         self._remember(listing, balanced_bounds(result, self._queue.capacity))
-        return ProbeResult(listing, result.stats, time.perf_counter() - started)
+        duration = time.perf_counter() - started
+        return ProbeResult(listing, result.stats, duration, result.requests, result.slow_downs)
 
     def _remember(self, listing: Listing, bounds: list[str]) -> None:
         self._bounds[listing] = bounds

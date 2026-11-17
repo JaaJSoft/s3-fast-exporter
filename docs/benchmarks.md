@@ -89,6 +89,15 @@ under `data/`:
 - Four processes pace themselves apart, so they cross the limit more often: one request in 26
   meets a 503, one in 385 for a single process.
 
+## The metric families of this exporter
+
+Its own families come from the pages the listing reads anyway. On CPython 3.15 in the image,
+reading a page of 1000 objects and adding it to the statistics takes 0.734 ms with them, against
+0.652 ms without: the storage class of a page of one class is checked with one count, the size
+buckets with one sort. A page that mixes storage classes takes 1.009 ms: the class of each object
+is read. On one core, a listing takes about 10% more CPU: a probe of 10 million objects spends
+14.5 to 15.4 s of CPU with them, against 13.0 to 13.8 s without.
+
 ## Page scanner
 
 `uv run python -m scripts.bench_scanner` reads a page of 1000 objects with the scanner and with
@@ -96,7 +105,7 @@ botocore's parser, which reads the whole XML document into dictionaries:
 
 | Runtime | Scanner | botocore |
 |---|---|---|
-| CPython 3.15 | 0.56 ms | 50.1 ms |
+| CPython 3.15 | 0.60 ms | 50.8 ms |
 
 ## Where the time goes
 

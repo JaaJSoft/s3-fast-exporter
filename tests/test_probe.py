@@ -74,6 +74,7 @@ def test_each_scan_splits_along_the_page_ends_of_the_previous_one(
     # One request finds the four groups of data/, then each of the first three ranges reads
     # one page into the next group. Later scans cut 8 ranges at page ends: no request is lost.
     assert [requests for _, requests in (first, second, third)] == [44, 40, 40]
+    assert [result.requests for result, _ in (first, second, third)] == [44, 40, 40]
     assert first[0].stats == second[0].stats == third[0].stats == virtual_stats(OBJECTS)
 
 
@@ -156,6 +157,8 @@ def test_scans_keep_the_pace_s3_accepts(aws_session: Session) -> None:
         done = probes(aws_session, (url, requests), BENCH, BENCH, BENCH)
     assert all(result.stats == virtual_stats(OBJECTS) for result, _ in done)
     assert 0 < slow_downs.total <= 24
+    assert sum(result.slow_downs for result, _ in done) == slow_downs.total
+    assert [result.requests - result.slow_downs for result, _ in done] == [44, 40, 40]
 
 
 def test_closing_cancels_the_scans_in_flight(aws_session: Session) -> None:

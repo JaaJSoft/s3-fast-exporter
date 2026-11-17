@@ -50,6 +50,8 @@ class Lister:
         self._retry = retry or RetryPolicy()
         self._proxies = proxies
         self._throttle = throttle or Throttle(sys.maxsize)
+        self.requests = 0
+        self.slow_downs = 0
 
     async def pages(
         self, bucket: str, *, prefix: str = "", delimiter: str = "", start_after: str = ""
@@ -76,6 +78,7 @@ class Lister:
         failures = slow_downs = 0
         while True:
             async with self._throttle.request() as pace:
+                self.requests += 1
                 try:
                     async with self._http.get(target, proxy=proxy) as response:
                         body = await response.read()
@@ -91,6 +94,7 @@ class Lister:
                         # Back to the queue after a pause, however long S3 takes to accept it.
                         self._throttle.slowed_down(pace)
                         slow_downs += 1
+                        self.slow_downs += 1
                     else:
                         failures += 1
                         retryable = response.status in RETRYABLE_STATUSES

@@ -44,6 +44,9 @@ class Scan:
     samples: list[Sample] = field(default_factory=list)
     entries: int = 0
     pages: int = 0
+    # Requests sent, retries included, and those S3 answered 503 SlowDown.
+    requests: int = 0
+    slow_downs: int = 0
 
     def add(self, page: ListPage) -> None:
         self.stats.add(page)
@@ -55,6 +58,8 @@ class Scan:
         self.samples += [(end, self.entries + count) for end, count in later.samples]
         self.entries += later.entries
         self.pages += later.pages
+        self.requests += later.requests
+        self.slow_downs += later.slow_downs
 
 
 # Lists the range (after, until] of a listing; until None is the end of the listing.
