@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from exporter.failures import LISTING_ERRORS
 from exporter.ranges import LocalWorker, RangeQueue
 from exporter.s3.regions import Regions
-from exporter.scan import Listing, balanced_bounds, discover_bounds
+from exporter.scan import Listing, balanced_bounds, discover, scan
 from exporter.stats import ListingStats
 
 log = logging.getLogger(__name__)
@@ -73,12 +73,14 @@ class Prober:
         started = time.perf_counter()
         try:
             region = await self._regions.region_of(listing.bucket)
+            list_range = self._queue.lister(listing, region)
             bounds = self._bounds.get(listing)
             ranges = self._queue.capacity
             if bounds is None and ranges > 1 and not listing.delimiter:
                 lister = await self._local.lister(listing.bucket, region)
-                bounds = await discover_bounds(lister, listing, ranges)
-            result = await self._queue.scan(listing, region, bounds or ())
+                result = await discover(list_range, lister, listing, ranges)
+            else:
+                result = await scan(list_range, bounds or ())
         except LISTING_ERRORS as error:
             self._regions.forget(listing.bucket)
             log.warning("listing failed", extra=_fields(listing, error=str(error)))

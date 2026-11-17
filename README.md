@@ -6,8 +6,8 @@ maintained, and replaces it without touching dashboards or alerts: same flags, s
 variables, same port, same metrics.
 
 Large prefixes are listed in parallel: with S3 answering in 60 ms, a million objects take 1.5
-seconds on one core, where the upstream exporter takes 74 seconds, and ten million take 5 seconds
-on four cores. See [docs/benchmarks.md](docs/benchmarks.md).
+seconds on one core, where the upstream exporter takes 73 seconds, and a hundred million take 44
+seconds on four cores. See [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Quick start
 
@@ -78,7 +78,8 @@ S3 lists keys in order, and can start a listing after any key. A probe splits it
 ranges and lists them at once:
 
 - the first probe of a prefix splits it along its top-level "folders", the common prefixes of a
-  listing with the `/` delimiter;
+  listing with the `/` delimiter, read a thousand at a time while the ranges of the previous ones
+  are listed;
 - each later probe splits it along the pages of the previous listing, into ranges of as many
   objects each, so that it sends as many requests as a single listing would.
 
@@ -91,7 +92,7 @@ share its result.
 The ranges of every probe wait in one queue, for a process that lists them: the exporter's own,
 or with `--s3.list-processes` set to N, N worker processes. A listing takes about 1.5 seconds of
 CPU per million objects, and each process lists up to `--s3.list-concurrency` ranges at once:
-four processes on four cores list 10 million objects 3 times as fast as one. Give the container
+four processes on four cores list 100 million objects 3.4 times as fast as one. Give the container
 as many cores, and about 100 MiB of memory per process. A worker process that stops hands its
 ranges back to the queue, and starts again.
 
@@ -145,6 +146,21 @@ scrape_configs:
         target_label: __param_prefix
       - target_label: __address__
         replacement: 127.0.0.1:9340
+```
+
+A probe answers within the scrape timeout Prometheus sends, 10 seconds by default: one core lists
+about 6 million objects in that time, four cores about 20 million. Probe larger prefixes in a job
+of their own, with room to spare:
+
+```yaml
+scrape_configs:
+  - job_name: s3-archives
+    metrics_path: /probe
+    scrape_interval: 15m
+    scrape_timeout: 3m   # 100 million objects take 2.5 minutes on one core, 45 s on four
+    static_configs:
+      - targets: [bucket=archives;prefix=;]
+    relabel_configs: ...   # as above
 ```
 
 Or probe every bucket the exporter can see, keeping some of them:

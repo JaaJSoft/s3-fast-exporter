@@ -15,7 +15,7 @@ from exporter.scan import (
     RangeLister,
     Scan,
     balanced_bounds,
-    discover_bounds,
+    discover,
     scan,
     scan_range,
 )
@@ -130,7 +130,7 @@ def test_scans_after_a_discovered_one_cost_the_requests_of_a_single_listing(
     source = StoreSource(named(*(f"{group}/{key:02d}" for group in "abcdef" for key in range(12))))
     source.max_keys = 4
     single = loop.run(scan(listed(source, LISTING)))
-    first = loop.run(scan(listed(source, LISTING), loop.run(discover_bounds(source, LISTING, 64))))
+    first = loop.run(discover(listed(source, LISTING), source, LISTING, 64))
     source.requests = 0
     loop.run(scan(listed(source, LISTING), balanced_bounds(first, ranges)))
     assert source.requests == single.pages
@@ -160,16 +160,44 @@ def test_listings_of_few_pages_are_not_split(loop: asyncio.Runner) -> None:
         ),
         pytest.param(["1", "2", "3"], 1000, [], id="no-group"),
         pytest.param(["a/b/c/d/1", "a/b/c/e/1"], 1000, [], id="deeper-than-discovery"),
+        # Three pages of groups: each page splits, and ends where the next one starts.
         pytest.param(
-            [f"{letter}/1" for letter in "abcde"], 2, ["b/"], id="first-page-of-a-wide-level"
+            [f"{letter}/1" for letter in "abcde"],
+            2,
+            ["b/", "b0", "d/", "d0"],
+            id="wide-level",
         ),
     ],
 )
-def test_first_scans_split_on_the_top_groups(
+def test_first_scans_split_along_the_top_groups(
     loop: asyncio.Runner, keys: list[str], max_keys: int, expected: list[str]
 ) -> None:
     source = StoreSource(named(*keys), max_keys=max_keys)
-    assert loop.run(discover_bounds(source, LISTING, 4)) == expected
+    starts: list[str] = []
+
+    async def list_range(after: str, until: str | None) -> Scan:
+        starts.append(after)
+        return await scan_range(source, LISTING, after, until)
+
+    loop.run(discover(list_range, source, LISTING, 4))
+    assert sorted(starts)[1:] == expected
+
+
+@settings(max_examples=300, deadline=None)
+@given(objects, prefixes, st.integers(1, 3), st.integers(1, 5))
+def test_a_first_scan_gives_the_result_of_a_single_listing(
+    loop: asyncio.Runner,
+    objects: list[tuple[str, int, int]],
+    prefix: str,
+    max_keys: int,
+    ranges: int,
+) -> None:
+    source = StoreSource(bucket_of(objects), max_keys=max_keys)
+    listing = Listing("bucket", prefix)
+    single = loop.run(scan(listed(source, listing)))
+    first = loop.run(discover(listed(source, listing), source, listing, ranges))
+    assert first.stats == single.stats
+    assert first.entries == single.entries
 
 
 class IgnoringStartAfter(StoreSource):

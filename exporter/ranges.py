@@ -20,7 +20,7 @@ from exporter.s3.lister import Lister, RetryPolicy
 from exporter.s3.proxies import Proxies
 from exporter.s3.regions import REMEMBERED_BUCKETS, Regions
 from exporter.s3.throttle import Throttle
-from exporter.scan import Listing, Scan, scan, scan_range
+from exporter.scan import Listing, RangeLister, Scan, scan_range
 
 # A range whose worker stopped is listed by another one, once: a second loss points at the range.
 LOST_ATTEMPTS = 2
@@ -100,9 +100,9 @@ class RangeQueue:
                 self._room.put_nowait(worker)
         self.capacity = self._room.qsize()
 
-    async def scan(self, listing: Listing, region: str, bounds: Sequence[str]) -> Scan:
-        """Lists the ranges between the bounds, and merges them in key order."""
-        return await scan(partial(self._list, listing, region), bounds)
+    def lister(self, listing: Listing, region: str) -> RangeLister:
+        """Lists ranges of the listing through the queue."""
+        return partial(self._list, listing, region)
 
     async def _list(self, listing: Listing, region: str, after: str, until: str | None) -> Scan:
         job = RangeJob(listing, region, after, until)

@@ -73,8 +73,46 @@ async def scan(list_range: RangeLister, bounds: Sequence[str] = ()) -> Scan:
             ]
     except ExceptionGroup as failures:
         raise failures.exceptions[0] from None
+    return _merged(ranges)
+
+
+async def discover(
+    list_range: RangeLister, source: PageSource, listing: Listing, ranges: int
+) -> Scan:
+    """Lists a prefix met for the first time, split along the groups of its "/" hierarchy.
+
+    The groups come a page at a time: the ranges of a page are listed while the next page is
+    read, so that a level of many thousands of groups is split all along.
+    """
+    page, level = await _top_level(source, listing)
+    parts: list[asyncio.Task[Scan]] = []
+    try:
+        async with asyncio.TaskGroup() as group:
+            after = ""
+            while True:
+                groups = [decode(name) for name in page.common_prefixes]
+                last = page.last()
+                # A level goes on while its pages hold groups; past them, the rest is one range.
+                end = None
+                if page.next_token is not None and last is not None and len(groups) > 1:
+                    end = _bound_after(*last)
+                bounds = _spread(groups, ranges)
+                parts += [
+                    group.create_task(list_range(start, stop))
+                    for start, stop in zip([after, *bounds], [*bounds, end], strict=True)
+                ]
+                if end is None:
+                    break
+                after = end
+                page = await _first_page(source, listing.bucket, level, after)
+    except ExceptionGroup as failures:
+        raise failures.exceptions[0] from None
+    return _merged(parts)
+
+
+def _merged(parts: list[asyncio.Task[Scan]]) -> Scan:
     total = Scan()
-    for part in ranges:
+    for part in parts:
         total.extend(part.result())
     return total
 
@@ -143,16 +181,24 @@ def balanced_bounds(scan: Scan, ranges: int) -> list[str]:
     return bounds
 
 
-async def discover_bounds(source: PageSource, listing: Listing, ranges: int) -> list[str]:
-    """Bounds for a first scan: the groups at the top of the prefix's "/" hierarchy, spread out."""
-    prefix = listing.prefix
-    for _ in range(DISCOVERY_DEPTH):
-        pages = source.pages(listing.bucket, prefix=prefix, delimiter="/", start_after="")
-        async with aclosing(pages):
-            page = await anext(pages)
-        groups = [decode(group) for group in page.common_prefixes]
-        if len(groups) != 1 or page.next_token is not None:
-            ranges = min(ranges, len(groups))
-            return [groups[len(groups) * index // ranges] for index in range(1, ranges)]
-        prefix = groups[0]
-    return []
+async def _top_level(source: PageSource, listing: Listing) -> tuple[ListPage, str]:
+    """The first page of the first level under the prefix that holds more than one group."""
+    level = listing.prefix
+    for _ in range(DISCOVERY_DEPTH - 1):
+        page = await _first_page(source, listing.bucket, level, "")
+        if len(page.common_prefixes) != 1 or page.next_token is not None:
+            return page, level
+        level = decode(page.common_prefixes[0])
+    return await _first_page(source, listing.bucket, level, ""), level
+
+
+async def _first_page(source: PageSource, bucket: str, prefix: str, after: str) -> ListPage:
+    pages = source.pages(bucket, prefix=prefix, delimiter="/", start_after=after)
+    async with aclosing(pages):
+        return await anext(pages)
+
+
+def _spread(groups: list[str], ranges: int) -> list[str]:
+    """Bounds among the groups, for as many ranges at most, each over as many groups."""
+    ranges = min(ranges, len(groups))
+    return [groups[len(groups) * index // ranges] for index in range(1, ranges)]
