@@ -110,6 +110,7 @@ class _Process:
         self._loop = loop
         self._pending: dict[int, asyncio.Future[Listed | Failed]] = {}
         self._stopping = False
+        self._exited = threading.Event()
         self.running = True
         threading.Thread(target=self._receive, args=(results,), daemon=True).start()
 
@@ -140,10 +141,9 @@ class _Process:
         self._jobs.close()
 
     def join(self) -> None:
-        self._process.join(STOP_SECONDS)
-        if self._process.is_alive():
+        if not self._exited.wait(STOP_SECONDS):
             self._process.kill()
-            self._process.join()
+            self._exited.wait()
 
     def _receive(self, results: Connection) -> None:
         with suppress(EOFError, OSError):
@@ -151,7 +151,10 @@ class _Process:
                 message = results.recv()
                 self._loop.call_soon_threadsafe(self._settle, message)
         results.close()
-        self._process.join(STOP_SECONDS)
+        # The one thread that waits for the process: two waiting for it would race to reap it,
+        # and the loser could take it for alive, or kill a pid given to another process since.
+        self._process.join()
+        self._exited.set()
         # The event loop may be closed already, when the exporter stops.
         with suppress(RuntimeError):
             self._loop.call_soon_threadsafe(self._stopped, self._process.exitcode)
