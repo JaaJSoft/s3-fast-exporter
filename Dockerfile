@@ -18,6 +18,9 @@ LABEL org.opencontainers.image.title="s3-fast-exporter" \
       org.opencontainers.image.source="https://github.com/JaaJSoft/s3-fast-exporter" \
       org.opencontainers.image.vendor="JaaJSoft" \
       org.opencontainers.image.licenses="Apache-2.0"
+# pip only installs packages, and it vendors its own copies of urllib3, msgpack and setuptools
+# that lag behind their fixes.
+RUN python -m pip uninstall --yes --no-cache-dir pip
 COPY --from=build /opt/venv /opt/venv
 COPY LICENSE NOTICE /usr/share/doc/s3-fast-exporter/
 
