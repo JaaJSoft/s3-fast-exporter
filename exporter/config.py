@@ -22,6 +22,7 @@ class Settings:
     discovery_path: str
     endpoint_url: str | None
     disable_ssl: bool
+    insecure_skip_verify: bool
     force_path_style: bool
     list_concurrency: int
     list_processes: int
@@ -62,6 +63,10 @@ def parse_settings(argv: Sequence[str], environ: Mapping[str, str]) -> Settings:
     option("web.discovery-path", "/discovery", "Path under which to expose service discovery.")
     option("s3.endpoint-url", "", "Custom S3 endpoint URL.")
     switch("s3.disable-ssl", "Talk to S3 over HTTP instead of HTTPS.")
+    switch(
+        "s3.insecure-skip-verify",
+        "Accept any TLS certificate from S3, checking neither its chain nor its host name.",
+    )
     switch("s3.force-path-style", "Address buckets with path-style instead of virtual-hosted URLs.")
     option(
         "s3.list-concurrency",
@@ -99,6 +104,7 @@ def parse_settings(argv: Sequence[str], environ: Mapping[str, str]) -> Settings:
         discovery_path=args.web_discovery_path,
         endpoint_url=args.s3_endpoint_url or None,
         disable_ssl=args.s3_disable_ssl,
+        insecure_skip_verify=args.s3_insecure_skip_verify,
         force_path_style=args.s3_force_path_style,
         list_concurrency=args.s3_list_concurrency,
         list_processes=args.s3_list_processes,

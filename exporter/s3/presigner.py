@@ -23,6 +23,7 @@ class Endpoint:
     url: str | None = None
     path_style: bool = False
     use_ssl: bool = True
+    verify_tls: bool = True
 
 
 AWS_ENDPOINT = Endpoint()
@@ -35,6 +36,8 @@ def s3_client(session: Session, region: str, endpoint: Endpoint) -> Any:
         region_name=region,
         endpoint_url=endpoint.url,
         use_ssl=endpoint.use_ssl,
+        # None keeps the CA bundle of the AWS configuration; True would drop it.
+        verify=None if endpoint.verify_tls else False,
         config=Config(
             signature_version="s3v4",
             s3={"addressing_style": "path" if endpoint.path_style else "virtual"},
