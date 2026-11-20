@@ -10,6 +10,7 @@ DEFAULTS = Settings(
     discovery_path="/discovery",
     endpoint_url=None,
     disable_ssl=False,
+    insecure_skip_verify=False,
     force_path_style=False,
     list_concurrency=64,
     list_processes=1,
@@ -51,6 +52,7 @@ def test_environment_variables_are_named_like_upstream_and_flags_win() -> None:
         "S3_EXPORTER_WEB_LISTEN_ADDRESS": ":9341",
         "S3_EXPORTER_S3_ENDPOINT_URL": "http://env:9000",
         "S3_EXPORTER_S3_DISABLE_SSL": "true",
+        "S3_EXPORTER_S3_INSECURE_SKIP_VERIFY": "true",
         "S3_EXPORTER_S3_FORCE_PATH_STYLE": "1",
         "S3_EXPORTER_S3_LIST_CONCURRENCY": "8",
         "S3_EXPORTER_S3_LIST_PROCESSES": "4",
@@ -60,6 +62,7 @@ def test_environment_variables_are_named_like_upstream_and_flags_win() -> None:
     assert settings.listen_port == 9341
     assert settings.endpoint_url == "http://env:9000"
     assert not settings.disable_ssl
+    assert settings.insecure_skip_verify
     assert settings.force_path_style
     assert settings.list_concurrency == 8
     assert settings.list_processes == 4
@@ -92,6 +95,7 @@ def test_ipv6_listen_address() -> None:
         (["--log.level=verbose"], {}),
         (["--log.format=logger:syslog"], {}),
         ([], {"S3_EXPORTER_S3_DISABLE_SSL": "yes"}),
+        ([], {"S3_EXPORTER_S3_INSECURE_SKIP_VERIFY": "yes"}),
         (["--s3.list-concurrency=0"], {}),
         (["--s3.list-concurrency=-4"], {}),
         ([], {"S3_EXPORTER_S3_LIST_CONCURRENCY": "many"}),
@@ -102,3 +106,9 @@ def test_invalid_settings_exit_with_usage(argv: list[str], environ: dict[str, st
     with pytest.raises(SystemExit) as exit_:
         parse_settings(argv, environ)
     assert exit_.value.code == 2
+
+
+def test_certificate_verification_can_be_turned_off() -> None:
+    assert parse_settings(["--s3.insecure-skip-verify"], {}).insecure_skip_verify
+    environ = {"S3_EXPORTER_S3_INSECURE_SKIP_VERIFY": "1"}
+    assert not parse_settings(["--no-s3.insecure-skip-verify"], environ).insecure_skip_verify

@@ -1,5 +1,6 @@
 import asyncio
 import socket
+import ssl
 import threading
 import urllib.request
 from collections.abc import Iterator
@@ -9,16 +10,16 @@ from aiohttp import web
 
 
 @contextmanager
-def serve_app(app: web.Application) -> Iterator[str]:
+def serve_app(app: web.Application, tls: ssl.SSLContext | None = None) -> Iterator[str]:
     loop = asyncio.new_event_loop()
     runner = web.AppRunner(app, access_log=None)
     loop.run_until_complete(runner.setup())
-    loop.run_until_complete(web.TCPSite(runner, "127.0.0.1", 0).start())
+    loop.run_until_complete(web.TCPSite(runner, "127.0.0.1", 0, ssl_context=tls).start())
     host, port = runner.addresses[0][:2]
     thread = threading.Thread(target=loop.run_forever, daemon=True)
     thread.start()
     try:
-        yield f"http://{host}:{port}"
+        yield f"{'https' if tls else 'http'}://{host}:{port}"
     finally:
         asyncio.run_coroutine_threadsafe(runner.cleanup(), loop).result()
         loop.call_soon_threadsafe(loop.stop)

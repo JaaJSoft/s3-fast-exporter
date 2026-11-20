@@ -189,7 +189,9 @@ async def _work(
     session = get_session()
     regions = Regions(lambda region: Presigner(session, region=region, endpoint=endpoint))
     running: dict[int, asyncio.Task[Scan]] = {}
-    async with http_client(session, settings.list_concurrency) as http:
+    async with http_client(
+        session, settings.list_concurrency, verify_tls=endpoint.verify_tls
+    ) as http:
         local = LocalWorker(
             http,
             regions,

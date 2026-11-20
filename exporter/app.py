@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import math
+import warnings
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from html import escape
@@ -67,7 +68,12 @@ def s3_context(session: Session) -> Callable[[web.Application], AsyncIterator[No
             settings.endpoint_url,
             path_style=settings.force_path_style,
             use_ssl=not settings.disable_ssl,
+            verify_tls=not settings.insecure_skip_verify,
         )
+        if not endpoint.verify_tls:
+            log.warning("TLS certificates of S3 are not verified")
+            # urllib3 would print the same warning on stderr, outside the log format.
+            warnings.filterwarnings("ignore", "Unverified HTTPS request", module="urllib3")
         account = await asyncio.to_thread(Account, session, region=region, endpoint=endpoint)
         regions = Regions(
             lambda bucket_region: Presigner(session, region=bucket_region, endpoint=endpoint),
@@ -77,7 +83,9 @@ def s3_context(session: Session) -> Callable[[web.Application], AsyncIterator[No
         )
         processes: list[ProcessWorker] = []
         try:
-            async with http_client(session, settings.list_concurrency) as http:
+            async with http_client(
+                session, settings.list_concurrency, verify_tls=endpoint.verify_tls
+            ) as http:
                 local = LocalWorker(
                     http,
                     regions,

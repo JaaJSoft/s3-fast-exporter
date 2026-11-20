@@ -52,6 +52,7 @@ The image can also be built from this repository with `docker build -t s3-fast-e
 | `--s3.endpoint-url` | `S3_EXPORTER_S3_ENDPOINT_URL` | AWS | URL of another S3 service |
 | `--s3.force-path-style` | `S3_EXPORTER_S3_FORCE_PATH_STYLE` | off | path-style URLs instead of virtual-hosted buckets |
 | `--s3.disable-ssl` | `S3_EXPORTER_S3_DISABLE_SSL` | off | HTTP instead of HTTPS |
+| `--s3.insecure-skip-verify` | `S3_EXPORTER_S3_INSECURE_SKIP_VERIFY` | off | accept any TLS certificate from S3, self-signed or for another host name; not in upstream |
 | `--s3.list-concurrency` | `S3_EXPORTER_S3_LIST_CONCURRENCY` | `64` | most ListObjectsV2 requests a listing process sends to a bucket at once |
 | `--s3.list-processes` | `S3_EXPORTER_S3_LIST_PROCESSES` | `1` | processes that list, each using up to a core; past 1, worker processes list |
 | `--log.level` | `S3_EXPORTER_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` or `fatal` |
@@ -63,7 +64,8 @@ AWS access goes through botocore, so the usual AWS configuration applies:
 - credentials come from variables, shared files and profiles, web identity (EKS IRSA), EKS Pod
   Identity, ECS task roles, EC2 instance profiles or SSO;
 - `AWS_REGION` sets the default region;
-- `AWS_CA_BUNDLE` adds a private certificate authority;
+- `AWS_CA_BUNDLE` adds a private certificate authority, which is safer than
+  `--s3.insecure-skip-verify`;
 - `HTTPS_PROXY` and `NO_PROXY` set proxies.
 
 On AWS, the region of each bucket is found automatically. The exporter needs `s3:ListBucket` on
