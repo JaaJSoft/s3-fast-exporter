@@ -1,6 +1,6 @@
 [project]
 name = "s3-fast-exporter"
-version = "1.0.0"
+version = "1.1.0"
 description = "Prometheus exporter for S3 buckets and objects, built for large buckets."
 readme = "README.md"
 authors = [{ name = "JaaJSoft" }]
