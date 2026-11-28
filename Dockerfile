@@ -12,12 +12,16 @@ COPY README.md LICENSE ./
 COPY exporter ./exporter
 RUN uv sync --frozen --no-dev --no-editable --extra uvloop
 
-FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928
+FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS runtime
 LABEL org.opencontainers.image.title="s3-fast-exporter" \
       org.opencontainers.image.description="Prometheus exporter for S3 buckets and objects" \
       org.opencontainers.image.source="https://github.com/JaaJSoft/s3-fast-exporter" \
       org.opencontainers.image.vendor="JaaJSoft" \
       org.opencontainers.image.licenses="Apache-2.0"
+# The base image is rebuilt on its own schedule, days or weeks after Debian ships a security fix.
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get upgrade --yes \
+ && rm -rf /var/lib/apt/lists/*
 # pip only installs packages, and it vendors its own copies of urllib3, msgpack and setuptools
 # that lag behind their fixes.
 RUN python -m pip uninstall --yes --no-cache-dir pip
